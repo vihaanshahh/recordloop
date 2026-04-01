@@ -1,19 +1,30 @@
 """
-Playwright Recorder - Lightweight Playwright abstraction for test recording.
+RecordLoop - Developer-first screen recording SDK for any frontend.
 
-A simple, intuitive API for recording Playwright actions, generating test code,
-and capturing videos of test runs.
+Works with React, Vue, Next.js, Vite, Angular, Svelte, and more.
+Auto-detects your framework and configures sensible defaults.
+
+Quick start:
+    python -m recordloop init        # auto-detect & generate .env
+    python -m recordloop report      # visualize recordings
 
 Usage:
-    from playwright_recorder import PlaywrightRecorder, recordable, video_capture
+    from recordloop import PlaywrightRecorder, RecordLoopConfig
 
-    # Basic recording
-    with PlaywrightRecorder() as recorder:
-        page = recorder.start_recording("https://example.com")
+    config = RecordLoopConfig()  # reads .env + detects framework
+    with PlaywrightRecorder(config.to_recorder_config()) as recorder:
+        page = recorder.start_recording(config.base_url)
         page.click("#button")
         recorder.stop_recording()
-        code = recorder.generate_test_code()
+        print(recorder.generate_test_code())
 """
+
+# Config (env-aware, framework-detecting)
+from .config import (
+    RecordLoopConfig,
+    detect_framework,
+    FRAMEWORK_DEFAULTS,
+)
 
 # Core recorder
 from .recorder import (
@@ -44,8 +55,15 @@ from .decorators import (
     DecoratorConfig,
 )
 
+# Report
+from .report import generate_report
+
 __version__ = "1.0.0"
 __all__ = [
+    # Config
+    "RecordLoopConfig",
+    "detect_framework",
+    "FRAMEWORK_DEFAULTS",
     # Core
     "PlaywrightRecorder",
     "RecorderConfig",
@@ -64,6 +82,8 @@ __all__ = [
     "RecordedTest",
     "replay",
     "DecoratorConfig",
+    # Report
+    "generate_report",
     # Utilities
     "AutoRecordingHandler",
     "watch_for_changes",

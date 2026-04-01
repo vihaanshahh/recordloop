@@ -1,0 +1,135 @@
+"""
+Setup wizard for RecordLoop.
+
+Run: python -m recordloop init
+
+Detects your frontend framework, generates a .env file,
+and prints a quick-start snippet.
+"""
+
+import sys
+from pathlib import Path
+
+from .config import RecordLoopConfig, detect_framework, FRAMEWORK_DEFAULTS
+
+
+def init(project_dir: str = "."):
+    """Auto-detect framework and write a .env config file."""
+    project = Path(project_dir)
+    framework = detect_framework(project_dir)
+
+    print("RecordLoop Setup")
+    print("=" * 40)
+
+    if framework:
+        defaults = FRAMEWORK_DEFAULTS.get(framework, {})
+        port = defaults.get("port", 3000)
+        dev_cmd = defaults.get("dev_cmd", "npm run dev")
+        print(f"Detected: {framework}")
+        print(f"Dev server: {dev_cmd} (port {port})")
+    else:
+        port = 3000
+        dev_cmd = None
+        print("No framework detected (no package.json or unknown deps).")
+        print("Using defaults (localhost:3000).")
+
+    # Write .env file
+    env_path = project / ".env"
+    if env_path.exists():
+        print(f"\n.env already exists at {env_path}")
+        print("Skipping .env generation. Edit it manually or delete to re-run.")
+    else:
+        env_content = _generate_env(framework or "", port)
+        env_path.write_text(env_content)
+        print(f"\nCreated {env_path}")
+
+    # Ensure .gitignore has .env
+    _ensure_gitignore(project)
+
+    # Print quick-start
+    print("\n" + "-" * 40)
+    print("Quick start:\n")
+
+    if dev_cmd:
+        print(f"  1. Start your app:  {dev_cmd}")
+    else:
+        print("  1. Start your app on localhost:3000")
+
+    print("  2. Record a test:\n")
+    print("     from recordloop import PlaywrightRecorder, RecordLoopConfig")
+    print("")
+    print("     config = RecordLoopConfig()  # reads .env automatically")
+    print("     with PlaywrightRecorder(config.to_recorder_config()) as rec:")
+    print('         page = rec.start_recording(config.base_url)')
+    print('         page.click("#my-button")')
+    print("         rec.stop_recording()")
+    print("         print(rec.generate_test_code())")
+
+    print("\n  3. View results:\n")
+    print("     python -m recordloop report")
+    print()
+
+
+def _generate_env(framework: str, port: int) -> str:
+    """Generate a .env file with sensible defaults."""
+    lines = [
+        "# RecordLoop Configuration",
+        "# Auto-generated — edit as needed",
+        "",
+        f"RECORDLOOP_FRAMEWORK={framework}",
+        f"RECORDLOOP_BASE_URL=http://localhost:{port}",
+        f"RECORDLOOP_PORT={port}",
+        "",
+        "# Recording settings",
+        "RECORDLOOP_VIDEO_DIR=test-videos",
+        "RECORDLOOP_TEST_OUTPUT_DIR=generated-tests",
+        "RECORDLOOP_HEADLESS=true",
+        "RECORDLOOP_SLOW_MO=0",
+        "",
+        "# Viewport",
+        "RECORDLOOP_VIEWPORT_WIDTH=1280",
+        "RECORDLOOP_VIEWPORT_HEIGHT=720",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _ensure_gitignore(project: Path):
+    """Make sure .env is in .gitignore."""
+    gitignore = project / ".gitignore"
+    if gitignore.exists():
+        content = gitignore.read_text()
+        if ".env" not in content:
+            with open(gitignore, "a") as f:
+                f.write("\n.env\n")
+            print("Added .env to .gitignore")
+    else:
+        gitignore.write_text(".env\n")
+        print("Created .gitignore with .env entry")
+
+
+def main():
+    """CLI entry point."""
+    args = sys.argv[1:]
+
+    if not args or args[0] == "init":
+        project_dir = args[1] if len(args) > 1 else "."
+        init(project_dir)
+    elif args[0] == "report":
+        from .report import generate_report
+        recordings_dir = args[1] if len(args) > 1 else "generated-tests"
+        video_dir = args[2] if len(args) > 2 else "test-videos"
+        output = generate_report(recordings_dir, video_dir)
+        print(f"Report generated: {output}")
+    elif args[0] == "config":
+        config = RecordLoopConfig()
+        print(config.summary())
+    else:
+        print("Usage:")
+        print("  python -m recordloop init [project_dir]  — Setup config")
+        print("  python -m recordloop report              — Generate HTML report")
+        print("  python -m recordloop config              — Show current config")
+
+
+if __name__ == "__main__":
+    main()
