@@ -43,6 +43,11 @@ def init(project_dir: str = "."):
         env_path.write_text(env_content)
         print(f"\nCreated {env_path}")
 
+    # Create .recordloop/sessions/ directory
+    from .runner import init_sessions_dir
+    sessions_path = init_sessions_dir(str(project))
+    print(f"Created {sessions_path}")
+
     # Ensure .gitignore has .env
     _ensure_gitignore(project)
 
@@ -144,15 +149,48 @@ def main():
             if a == "--port" and i + 1 < len(args):
                 port = int(args[i + 1])
         serve(port=port)
+    elif args[0] == "run":
+        from .runner import Runner
+        import json as _json
+        sessions_dir = ".recordloop/sessions"
+        session_id = None
+        output_json = False
+        for i, a in enumerate(args[1:]):
+            if a == "--sessions-dir" and i + 2 <= len(args[1:]):
+                sessions_dir = args[i + 2]
+            elif a == "--output" and i + 2 <= len(args[1:]) and args[i + 2] == "json":
+                output_json = True
+            elif not a.startswith("--"):
+                session_id = a
+        runner = Runner(sessions_dir=sessions_dir)
+        results = runner.run(session_id)
+        if output_json:
+            print(_json.dumps(results, indent=2, default=str))
+        else:
+            for r in results:
+                status = r.get("status", "unknown")
+                sid = r.get("session_id", "?")
+                print(f"  [{status}] {sid}")
+                if r.get("video_url"):
+                    print(f"    Video: {r['video_url']}")
+                if r.get("video"):
+                    print(f"    Local: {r['video']}")
+                if r.get("test"):
+                    print(f"    Test:  {r['test']}")
+    elif args[0] == "setup-s3":
+        from .storage import setup_bucket
+        setup_bucket()
     elif args[0] == "config":
         config = RecordLoopConfig()
         print(config.summary())
     else:
         print("Usage:")
-        print("  python -m recordloop init [project_dir]  — Setup config")
-        print("  python -m recordloop serve [--port 8787] — Start bridge server")
-        print("  python -m recordloop report              — Generate HTML report")
-        print("  python -m recordloop config              — Show current config")
+        print("  python -m recordloop init              — Setup config and session dir")
+        print("  python -m recordloop serve             — Start bridge server (receives JS SDK)")
+        print("  python -m recordloop run [session_id]  — Replay sessions, record video, upload")
+        print("  python -m recordloop report            — Generate HTML report")
+        print("  python -m recordloop setup-s3          — Create and configure S3 bucket")
+        print("  python -m recordloop config            — Show current config")
 
 
 if __name__ == "__main__":

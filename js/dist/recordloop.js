@@ -20,6 +20,9 @@ const DEFAULT_OPTIONS = {
   // Where to POST session data (null = don't send, just collect)
   endpoint: null,
 
+  // InstantDB config (optional — enables real-time dashboard)
+  instantdb: null,  // { appId: '...', token: '...' } or null
+
   // Capture these event types
   clicks: true,
   input: true,
@@ -191,6 +194,11 @@ class RecordLoop {
     // Send to endpoint if configured
     if (this.options.endpoint) {
       this._send(session)
+    }
+
+    // Sync to InstantDB if configured
+    if (this.options.instantdb) {
+      this._syncToInstantDB(session)
     }
 
     return session
@@ -376,6 +384,51 @@ class RecordLoop {
     } catch (e) {
       console.warn('[RecordLoop] Failed to send session:', e.message)
     }
+  }
+
+  async _syncToInstantDB(session) {
+    const { appId } = this.options.instantdb
+    if (!appId) return
+
+    try {
+      await fetch('https://api.instantdb.com/admin/transact', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          'app_id': appId,
+          steps: [
+            ['update', 'sessions', session.id, {
+              sessionId: session.id,
+              url: session.url,
+              actionCount: session.actions.length,
+              durationMs: session.duration,
+              status: 'recorded',
+              viewport: JSON.stringify(session.viewport),
+              userAgent: session.userAgent,
+              createdAt: session.startedAt,
+            }],
+          ],
+        }),
+      })
+    } catch (e) {
+      console.warn('[RecordLoop] Failed to sync to InstantDB:', e.message)
+    }
+  }
+
+  /**
+   * Download the session as a JSON file.
+   * User can commit this to .recordloop/sessions/ for CI/CD processing.
+   */
+  download() {
+    const session = this.getSession()
+    const blob = new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${session.id}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    return session
   }
 }
 
