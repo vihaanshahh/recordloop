@@ -1,0 +1,38 @@
+{
+  "name": "recordloop",
+  "version": "0.1.0",
+  "description": "Capture browser interactions from any frontend — replay with Playwright, generate tests, record video.",
+  "main": "dist/recordloop.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "require": "./dist/recordloop.js"
+    },
+    "./react": {
+      "import": "./src/react.jsx",
+      "require": "./src/react.jsx"
+    },
+    "./vue": {
+      "import": "./src/vue.js",
+      "require": "./src/vue.js"
+    }
+  },
+  "files": [
+    "src/",
+    "dist/"
+  ],
+  "scripts": {
+    "build": "node build.js"
+  },
+  "peerDependencies": {
+    "react": ">=16.8.0",
+    "vue": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true },
+    "vue": { "optional": true }
+  },
+  "keywords": ["testing", "recording", "playwright", "e2e", "react", "vue", "angular", "svelte"],
+  "license": "MIT"
+}
