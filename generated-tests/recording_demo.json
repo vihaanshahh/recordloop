@@ -1,0 +1,152 @@
+[
+  {
+    "id": "18750607",
+    "timestamp": 0.8575265407562256,
+    "action_type": "ActionType.NAVIGATE",
+    "selector": null,
+    "value": "http://localhost:5173",
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "80f0fad0",
+    "timestamp": 0.9154806137084961,
+    "action_type": "ActionType.CLICK",
+    "selector": "#increment-btn",
+    "value": null,
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "7a2e9bb1",
+    "timestamp": 1.2531511783599854,
+    "action_type": "ActionType.CLICK",
+    "selector": "#increment-btn",
+    "value": null,
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "56e50773",
+    "timestamp": 1.5771205425262451,
+    "action_type": "ActionType.CLICK",
+    "selector": "#decrement-btn",
+    "value": null,
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "ff5692be",
+    "timestamp": 1.9113094806671143,
+    "action_type": "ActionType.SCREENSHOT",
+    "selector": null,
+    "value": "counter_after_clicks.png",
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "8a92f2bc",
+    "timestamp": 2.027090311050415,
+    "action_type": "ActionType.TYPE",
+    "selector": "#todo-input",
+    "value": "Test the recorder",
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "6b2d0c87",
+    "timestamp": 2.284827947616577,
+    "action_type": "ActionType.CLICK",
+    "selector": "#add-todo-btn",
+    "value": null,
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "d0ff29b5",
+    "timestamp": 2.6034109592437744,
+    "action_type": "ActionType.TYPE",
+    "selector": "#name-input",
+    "value": "John Doe",
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "b0f12042",
+    "timestamp": 2.7223336696624756,
+    "action_type": "ActionType.TYPE",
+    "selector": "#email-input",
+    "value": "john@example.com",
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "341a75d4",
+    "timestamp": 2.8415415287017822,
+    "action_type": "ActionType.SELECT",
+    "selector": "#topic-select",
+    "value": "feedback",
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "c9f2566d",
+    "timestamp": 2.9663031101226807,
+    "action_type": "ActionType.TYPE",
+    "selector": "#message-input",
+    "value": "This is a test message from the Playwright recorder demo.",
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "9b5483f9",
+    "timestamp": 3.3162589073181152,
+    "action_type": "ActionType.CLICK",
+    "selector": "#submit-form-btn",
+    "value": null,
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "2196cf34",
+    "timestamp": 3.8293821811676025,
+    "action_type": "ActionType.SCREENSHOT",
+    "selector": null,
+    "value": "form_success.png",
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "d705c808",
+    "timestamp": 4.005127191543579,
+    "action_type": "ActionType.CLICK",
+    "selector": "label:has(#toggle-darkmode)",
+    "value": null,
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  },
+  {
+    "id": "545c5a54",
+    "timestamp": 4.207760810852051,
+    "action_type": "ActionType.WAIT_FOR_TIMEOUT",
+    "selector": null,
+    "value": "500",
+    "options": {},
+    "page_url": "http://localhost:5173/",
+    "page_title": "react-test-app"
+  }
+]

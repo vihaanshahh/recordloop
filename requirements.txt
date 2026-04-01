@@ -1,0 +1,7 @@
+# Core dependencies
+playwright>=1.40.0
+pytest>=7.4.0
+watchdog>=3.0.0
+
+# Optional dependencies
+# python-dotenv>=1.0.0  # For environment variable management
