@@ -1,0 +1,105 @@
+name: 'RecordLoop'
+description: 'Replay recorded browser sessions with Playwright, capture video, and post to PR'
+
+inputs:
+  sessions-dir:
+    description: 'Directory containing session JSON files'
+    required: false
+    default: '.recordloop/sessions'
+  s3-bucket:
+    description: 'S3 bucket for video uploads'
+    required: true
+  s3-region:
+    description: 'AWS region for S3'
+    required: false
+    default: 'us-east-1'
+  aws-access-key-id:
+    description: 'AWS access key ID'
+    required: true
+  aws-secret-access-key:
+    description: 'AWS secret access key'
+    required: true
+  instantdb-app-id:
+    description: 'InstantDB app ID (optional — enables dashboard sync)'
+    required: false
+  instantdb-admin-token:
+    description: 'InstantDB admin token (optional)'
+    required: false
+  post-comment:
+    description: 'Post video links as PR comment'
+    required: false
+    default: 'true'
+  github-token:
+    description: 'GitHub token for posting PR comments'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  results:
+    description: 'JSON array of processing results'
+  comment:
+    description: 'The PR comment markdown'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Python dependencies
+      shell: bash
+      run: |
+        pip install playwright boto3 pytest watchdog
+        playwright install chromium --with-deps
+
+    - name: Run RecordLoop
+      shell: bash
+      id: run
+      env:
+        RECORDLOOP_S3_BUCKET: ${{ inputs.s3-bucket }}
+        RECORDLOOP_S3_REGION: ${{ inputs.s3-region }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+        RECORDLOOP_INSTANTDB_APP_ID: ${{ inputs.instantdb-app-id }}
+        RECORDLOOP_INSTANTDB_ADMIN_TOKEN: ${{ inputs.instantdb-admin-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+      run: |
+        python -m recordloop run --sessions-dir "${{ inputs.sessions-dir }}" --output json > /tmp/recordloop-results.json
+        echo "results=$(cat /tmp/recordloop-results.json)" >> $GITHUB_OUTPUT
+
+    - name: Post PR comment
+      if: inputs.post-comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        python -c "
+        import json, os, urllib.request
+
+        results = json.load(open('/tmp/recordloop-results.json'))
+
+        # Build comment
+        lines = ['## RecordLoop', '']
+        for r in results:
+            if r.get('video_url'):
+                lines.append(f\"**Session \`{r['session_id']}\`**\")
+                lines.append(f\"[Watch recording]({r['video_url']})\")
+                lines.append('')
+            elif r.get('status') == 'replay_failed':
+                lines.append(f\"- Failed: \`{r['session_id']}\` — {r.get('error', 'unknown')}\")
+
+        if not any(r.get('video_url') for r in results):
+            lines.append('No recordings to show.')
+
+        comment = '\n'.join(lines)
+
+        # Post to PR
+        repo = os.environ['GITHUB_REPOSITORY']
+        pr = '${{ github.event.pull_request.number }}'
+        url = f'https://api.github.com/repos/{repo}/issues/{pr}/comments'
+        data = json.dumps({'body': comment}).encode()
+        req = urllib.request.Request(url, data=data, headers={
+            'Authorization': f\"token {os.environ['GITHUB_TOKEN']}\",
+            'Content-Type': 'application/json',
+        })
+        urllib.request.urlopen(req)
+        print('Posted PR comment')
+        "

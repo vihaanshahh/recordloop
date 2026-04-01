@@ -58,6 +58,9 @@ from .decorators import (
 # Bridge (JS SDK → Python)
 from .bridge import convert_session, replay_session, serve as serve_bridge
 
+# Runner (CI/CD processing engine)
+from .runner import Runner
+
 # Report
 from .report import generate_report
 
@@ -89,6 +92,8 @@ __all__ = [
     "convert_session",
     "replay_session",
     "serve_bridge",
+    # Runner
+    "Runner",
     # Report
     "generate_report",
     # Utilities

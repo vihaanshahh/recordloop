@@ -200,11 +200,17 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         session_id = session.get("id", "unknown")
         print(f"[bridge] Received session {session_id} with {action_count} actions")
 
-        # Save the raw session
+        # Save the raw session to generated-tests for backward compat
         out_dir = Path(self.server.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         raw_path = out_dir / f"session_{session_id}_raw.json"
         raw_path.write_text(json.dumps(session, indent=2))
+
+        # Also save to .recordloop/sessions/ for CI/CD pipeline
+        sessions_dir = Path(".recordloop/sessions")
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        session_path = sessions_dir / f"{session_id}.json"
+        session_path.write_text(json.dumps(session, indent=2))
 
         # Convert to RecordedActions and save
         actions = convert_session(session)
