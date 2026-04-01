@@ -55,17 +55,33 @@ def init(project_dir: str = "."):
     else:
         print("  1. Start your app on localhost:3000")
 
-    print("  2. Record a test:\n")
-    print("     from recordloop import PlaywrightRecorder, RecordLoopConfig")
-    print("")
-    print("     config = RecordLoopConfig()  # reads .env automatically")
-    print("     with PlaywrightRecorder(config.to_recorder_config()) as rec:")
-    print('         page = rec.start_recording(config.base_url)')
-    print('         page.click("#my-button")')
-    print("         rec.stop_recording()")
-    print("         print(rec.generate_test_code())")
+    print(f"\n  2. Add the JS SDK to your frontend:\n")
+    print("     npm install recordloop")
+    print("     # or copy js/dist/recordloop.js into your project\n")
 
-    print("\n  3. View results:\n")
+    if framework in ("react", "vite", "next"):
+        print("     // React")
+        print("     import { RecordLoopProvider } from 'recordloop/react'")
+        print("")
+        print("     <RecordLoopProvider endpoint=\"http://localhost:8787\">")
+        print("       <App />")
+        print("     </RecordLoopProvider>")
+    elif framework in ("vue", "nuxt"):
+        print("     // Vue")
+        print("     import { RecordLoopPlugin } from 'recordloop/vue'")
+        print("     app.use(RecordLoopPlugin, { endpoint: 'http://localhost:8787' })")
+    else:
+        print("     // Any framework / vanilla JS")
+        print("     import { RecordLoop } from 'recordloop'")
+        print("     const rl = new RecordLoop({ endpoint: 'http://localhost:8787' })")
+        print("     rl.start()")
+
+    print(f"\n  3. Start the bridge server:\n")
+    print("     python -m recordloop serve\n")
+    print("     This receives sessions from the JS SDK, converts them")
+    print("     to Playwright tests, and generates test code.")
+
+    print(f"\n  4. View results:\n")
     print("     python -m recordloop report")
     print()
 
@@ -121,12 +137,20 @@ def main():
         video_dir = args[2] if len(args) > 2 else "test-videos"
         output = generate_report(recordings_dir, video_dir)
         print(f"Report generated: {output}")
+    elif args[0] == "serve":
+        from .bridge import serve
+        port = 8787
+        for i, a in enumerate(args[1:], 1):
+            if a == "--port" and i + 1 < len(args):
+                port = int(args[i + 1])
+        serve(port=port)
     elif args[0] == "config":
         config = RecordLoopConfig()
         print(config.summary())
     else:
         print("Usage:")
         print("  python -m recordloop init [project_dir]  — Setup config")
+        print("  python -m recordloop serve [--port 8787] — Start bridge server")
         print("  python -m recordloop report              — Generate HTML report")
         print("  python -m recordloop config              — Show current config")
 

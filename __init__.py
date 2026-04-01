@@ -55,6 +55,9 @@ from .decorators import (
     DecoratorConfig,
 )
 
+# Bridge (JS SDK → Python)
+from .bridge import convert_session, replay_session, serve as serve_bridge
+
 # Report
 from .report import generate_report
 
@@ -82,6 +85,10 @@ __all__ = [
     "RecordedTest",
     "replay",
     "DecoratorConfig",
+    # Bridge
+    "convert_session",
+    "replay_session",
+    "serve_bridge",
     # Report
     "generate_report",
     # Utilities

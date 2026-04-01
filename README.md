@@ -1,80 +1,244 @@
 # RecordLoop
 
-Record browser interactions, generate test code, and capture video — for any frontend framework.
+Drop a JS SDK into your frontend app. It captures every click, keystroke, and navigation from inside the browser. The Python bridge replays them with Playwright, generates test code, and records video.
 
-Works with **React, Vue, Next.js, Vite, Angular, Svelte, Gatsby, Remix, Astro**, and any app running on localhost.
+**Works with React, Vue, Next.js, Angular, Svelte, Astro, or any web app.** No framework lock-in — the core is vanilla JS.
 
-## Setup (30 seconds)
+## How it works
+
+```
+Your App (React/Vue/etc.)     Bridge Server       Playwright
+┌─────────────────────┐     ┌──────────────┐     ┌──────────────┐
+│  JS SDK captures     │────>│  Receives    │────>│  Replays     │
+│  clicks, typing,     │POST │  sessions,   │     │  actions,    │
+│  navigation          │     │  converts to │     │  records     │
+│                      │     │  actions     │     │  video       │
+└─────────────────────┘     └──────────────┘     └──────────────┘
+                                   │
+                              Generates test code
+```
+
+## Quick start
+
+### 1. Install
 
 ```bash
+# Python side
 pip install playwright pytest watchdog
 playwright install chromium
+
+# In your project
+python -m recordloop init    # detects framework, writes .env
 ```
 
-Then in your project directory:
+### 2. Add the JS SDK to your frontend
+
+**React:**
+
+```jsx
+import { RecordLoopProvider, useRecordLoop } from 'recordloop/react'
+
+function App() {
+  return (
+    <RecordLoopProvider endpoint="http://localhost:8787">
+      <YourApp />
+      <RecordButton />
+    </RecordLoopProvider>
+  )
+}
+
+function RecordButton() {
+  const { recording, actions, start, stop } = useRecordLoop()
+  return (
+    <button onClick={recording ? stop : start}>
+      {recording ? `Stop (${actions.length} actions)` : 'Record'}
+    </button>
+  )
+}
+```
+
+**Vue:**
+
+```js
+import { RecordLoopPlugin } from 'recordloop/vue'
+
+app.use(RecordLoopPlugin, { endpoint: 'http://localhost:8787' })
+```
+
+```vue
+<script setup>
+import { useRecordLoop } from 'recordloop/vue'
+const { recording, actions, start, stop } = useRecordLoop()
+</script>
+
+<template>
+  <button @click="recording ? stop() : start()">
+    {{ recording ? `Stop (${actions.length})` : 'Record' }}
+  </button>
+</template>
+```
+
+**Vanilla JS / any framework:**
+
+```html
+<script src="recordloop/dist/recordloop.js"></script>
+<script>
+  const rl = new RecordLoop({ endpoint: 'http://localhost:8787' })
+  rl.start()
+  // ... user interacts with your app ...
+  const session = rl.stop()  // captures everything
+</script>
+```
+
+Or as an ES module:
+
+```js
+import { RecordLoop } from 'recordloop'
+
+const rl = new RecordLoop({ endpoint: 'http://localhost:8787' })
+rl.start()
+```
+
+### 3. Start the bridge server
 
 ```bash
-python -m recordloop init
+python -m recordloop serve
 ```
 
-This will:
-- Auto-detect your frontend framework from `package.json`
-- Set the correct dev server port (3000, 5173, 4200, etc.)
-- Generate a `.env` file with your config
+This receives sessions from the JS SDK and:
+- Converts browser events to Playwright actions
+- Generates runnable test code (`generated-tests/test_session_*.py`)
+- Saves the recording as JSON
 
-### Environment Variables
+### 4. (Optional) Replay with video
 
-All config reads from `RECORDLOOP_*` env vars or a `.env` file:
+```python
+from recordloop import replay_session
+import json
+
+session = json.load(open("generated-tests/session_abc123_raw.json"))
+result = replay_session(session)
+# result = { "video": "test-videos/...", "test": "generated-tests/...", "recording": "..." }
+```
+
+### 5. View everything
+
+```bash
+python -m recordloop report
+# opens recordloop-report.html — action timelines, code preview, video playback
+```
+
+## JS SDK API
+
+### `RecordLoop` (core)
+
+```js
+const rl = new RecordLoop({
+  endpoint: 'http://localhost:8787',  // where to POST (null = collect only)
+  clicks: true,          // capture clicks
+  input: true,           // capture typing
+  navigation: true,      // capture SPA navigation (pushState)
+  scroll: true,          // capture scroll position
+  ignore: ['[data-recordloop-ignore]'],  // selectors to skip
+  debounceMs: 150,       // debounce scroll/resize
+  meta: {},              // custom metadata
+})
+
+rl.start()               // begin recording
+const session = rl.stop() // stop and get session object
+rl.getSession()          // get session without stopping
+rl.length                // number of recorded actions
+```
+
+### Selector strategy
+
+The JS SDK generates stable selectors by priority:
+1. `data-testid` / `data-test-id` attributes (best)
+2. `id` attributes
+3. `name` attributes (forms)
+4. `aria-label` attributes
+5. `:has-text()` for buttons/links
+6. CSS path (fallback)
+
+### React hooks
+
+```jsx
+// With provider
+import { RecordLoopProvider, useRecordLoop } from 'recordloop/react'
+
+// Standalone (no provider needed)
+import { useRecorder } from 'recordloop/react'
+const { recording, actions, start, stop } = useRecorder({ endpoint: '...' })
+```
+
+### Vue composables
+
+```js
+// With plugin
+import { RecordLoopPlugin, useRecordLoop } from 'recordloop/vue'
+
+// Standalone
+import { useRecorder } from 'recordloop/vue'
+const { recording, actions, start, stop } = useRecorder({ endpoint: '...' })
+```
+
+## CLI
+
+```bash
+python -m recordloop init              # Detect framework, generate .env
+python -m recordloop serve             # Start bridge (receives JS SDK sessions)
+python -m recordloop serve --port 9000 # Custom port
+python -m recordloop report            # Generate HTML report
+python -m recordloop config            # Print current config
+```
+
+## Environment variables
+
+All Python-side config reads from `RECORDLOOP_*` env vars or `.env`:
 
 | Variable | Default | Description |
 |---|---|---|
 | `RECORDLOOP_FRAMEWORK` | (auto-detected) | react, vue, next, vite, angular, svelte, etc. |
 | `RECORDLOOP_BASE_URL` | `http://localhost:3000` | Your dev server URL |
-| `RECORDLOOP_PORT` | `3000` | Dev server port (used if BASE_URL not set) |
-| `RECORDLOOP_VIDEO_DIR` | `test-videos` | Where videos are saved |
-| `RECORDLOOP_TEST_OUTPUT_DIR` | `generated-tests` | Where test code is saved |
-| `RECORDLOOP_HEADLESS` | `true` | Run browser headlessly |
-| `RECORDLOOP_SLOW_MO` | `0` | Slow down actions (ms) |
-| `RECORDLOOP_VIEWPORT_WIDTH` | `1280` | Browser viewport width |
-| `RECORDLOOP_VIEWPORT_HEIGHT` | `720` | Browser viewport height |
+| `RECORDLOOP_PORT` | `3000` | Dev server port |
+| `RECORDLOOP_VIDEO_DIR` | `test-videos` | Video output directory |
+| `RECORDLOOP_TEST_OUTPUT_DIR` | `generated-tests` | Generated test output |
+| `RECORDLOOP_HEADLESS` | `true` | Headless browser |
+| `RECORDLOOP_SLOW_MO` | `0` | Slow down replay (ms) |
 
-See `.env.example` for a template.
+## Framework detection
 
-## Quick Start
+RecordLoop reads `package.json` and sets the right port:
 
-### With env-aware config (recommended)
+| Framework | Port | Detection |
+|---|---|---|
+| React (CRA) | 3000 | `react` in deps |
+| React + Vite | 5173 | `react` + `vite` |
+| Next.js | 3000 | `next` |
+| Vue + Vite | 5173 | `vue` + `vite` |
+| Angular | 4200 | `@angular/core` |
+| Svelte | 5173 | `svelte` |
+| Gatsby | 8000 | `gatsby` |
+| Remix | 3000 | `@remix-run/react` |
+| Astro | 4321 | `astro` |
+
+## Python API (direct Playwright recording)
+
+You can also skip the JS SDK and record directly with Playwright:
 
 ```python
 from recordloop import PlaywrightRecorder, RecordLoopConfig
 
-config = RecordLoopConfig()  # reads .env + auto-detects framework
-
+config = RecordLoopConfig()
 with PlaywrightRecorder(config.to_recorder_config()) as recorder:
     page = recorder.start_recording(config.base_url)
-
-    page.fill("#search", "Playwright")
-    page.click("#search-button")
-
-    recorder.stop_recording()
-    code = recorder.generate_test_code(test_name="test_search")
-    print(code)
-```
-
-### With explicit config
-
-```python
-from recordloop import PlaywrightRecorder, RecorderConfig
-
-config = RecorderConfig(base_url="http://localhost:5173", headless=False)
-
-with PlaywrightRecorder(config) as recorder:
-    page = recorder.start_recording("http://localhost:5173")
-    page.click("#my-button")
+    page.fill("#search", "query")
+    page.click("#submit")
     recorder.stop_recording()
     print(recorder.generate_test_code())
 ```
 
-### Using Decorators
+Decorators:
 
 ```python
 from recordloop import recordable, video_capture
@@ -84,107 +248,4 @@ def test_login(page):
     page.goto("http://localhost:3000/login")
     page.fill("#username", "user@example.com")
     page.click("#login")
-
-@video_capture(output_dir="videos")
-def test_checkout(page):
-    page.goto("http://localhost:3000/checkout")
-    # ... test steps ...
 ```
-
-### Watch Mode
-
-```python
-from recordloop import TestRunner
-
-runner = TestRunner()
-runner.watch_mode(
-    watch_paths=["src/", "tests/"],
-    test_files=["tests/test_integration.py"]
-)
-```
-
-## Visualize Recordings
-
-Generate an HTML report with action timelines, test code previews, and video playback:
-
-```bash
-python -m recordloop report
-```
-
-Opens `recordloop-report.html` — a single-file dashboard showing all your recordings.
-
-## CLI Commands
-
-```bash
-python -m recordloop init              # Detect framework, generate .env
-python -m recordloop report            # Generate HTML report
-python -m recordloop config            # Print current config
-```
-
-## Framework Auto-Detection
-
-RecordLoop reads your `package.json` and picks the right defaults:
-
-| Framework | Default Port | Detected By |
-|---|---|---|
-| React (CRA) | 3000 | `react` in deps |
-| React + Vite | 5173 | `react` + `vite` in deps |
-| Next.js | 3000 | `next` in deps |
-| Vue + Vite | 5173 | `vue` + `vite` in deps |
-| Nuxt | 3000 | `nuxt` in deps |
-| Angular | 4200 | `@angular/core` in deps |
-| Svelte | 5173 | `svelte` in deps |
-| Gatsby | 8000 | `gatsby` in deps |
-| Remix | 3000 | `@remix-run/react` in deps |
-| Astro | 4321 | `astro` in deps |
-
-## API Reference
-
-### RecordLoopConfig
-
-Env-aware config that auto-detects your framework:
-
-```python
-config = RecordLoopConfig()             # auto-detect everything
-config = RecordLoopConfig(headless=False)  # override specific fields
-config.summary()                        # print human-readable config
-config.to_recorder_config()             # convert to RecorderConfig
-```
-
-### PlaywrightRecorder
-
-Core class for recording actions and generating test code.
-
-```python
-with PlaywrightRecorder(config) as recorder:
-    recorder.start_recording(url)
-    recorder.record_action(type, selector, value)
-    recorder.stop_recording()
-    recorder.generate_test_code()
-    recorder.save_test_code()
-```
-
-### Decorators
-
-- `@recordable()` — Auto-record actions and generate test code
-- `@video_capture()` — Capture video of test execution
-- `@watch_changes(paths)` — Auto-run test when files change
-
-### TestRunner
-
-```python
-runner = TestRunner()
-runner.run_tests(test_files, video_enabled=True)
-runner.watch_mode(watch_paths, test_files)
-```
-
-### Report
-
-```python
-from recordloop import generate_report
-generate_report()  # creates recordloop-report.html
-```
-
-## Action Types
-
-`NAVIGATE`, `CLICK`, `DOUBLE_CLICK`, `TYPE`, `PRESS`, `SELECT`, `CHECK`, `UNCHECK`, `HOVER`, `SCREENSHOT`, `WAIT_FOR_SELECTOR`, `WAIT_FOR_NAVIGATION`, `WAIT_FOR_TIMEOUT`

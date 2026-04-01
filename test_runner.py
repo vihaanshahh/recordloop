@@ -9,8 +9,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler, FileModifiedEvent
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler, FileModifiedEvent
+except ImportError:
+    Observer = None
+    FileSystemEventHandler = object
+    FileModifiedEvent = None
 
 from .recorder import RecorderConfig, PlaywrightRecorder, AutoRecordingHandler
 
