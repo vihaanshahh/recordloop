@@ -92,6 +92,7 @@ class RecorderConfig:
     slow_mo: int = 0
     viewport_width: int = 1280
     viewport_height: int = 720
+    executable_path: str = ""
 
 
 class PlaywrightRecorder:
@@ -134,10 +135,13 @@ class PlaywrightRecorder:
         if sync_playwright is None:
             raise ImportError("Playwright is required for browser recording. Install with: pip install playwright")
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(
-            headless=self.config.headless,
-            slow_mo=self.config.slow_mo,
-        )
+        launch_args = {
+            "headless": self.config.headless,
+            "slow_mo": self.config.slow_mo,
+        }
+        if self.config.executable_path:
+            launch_args["executable_path"] = self.config.executable_path
+        self._browser = self._playwright.chromium.launch(**launch_args)
         
         # Prepare video directory
         video_dir = Path(self.config.video_dir)
