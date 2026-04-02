@@ -14,9 +14,21 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Any
-from playwright.sync_api import sync_playwright, Browser, Page, BrowserContext
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler, FileModifiedEvent
+try:
+    from playwright.sync_api import sync_playwright, Browser, Page, BrowserContext
+except ImportError:
+    sync_playwright = None
+    Browser = None
+    Page = None
+    BrowserContext = None
+
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler, FileModifiedEvent
+except ImportError:
+    Observer = None
+    FileSystemEventHandler = object
+    FileModifiedEvent = None
 
 
 class ActionType(Enum):
@@ -80,6 +92,7 @@ class RecorderConfig:
     slow_mo: int = 0
     viewport_width: int = 1280
     viewport_height: int = 720
+    executable_path: str = ""
 
 
 class PlaywrightRecorder:
@@ -117,13 +130,18 @@ class PlaywrightRecorder:
         """Generate unique ID for an action."""
         return str(uuid.uuid4())[:8]
     
-    def _setup_browser(self) -> tuple[Browser, BrowserContext, Page]:
+    def _setup_browser(self):
         """Initialize Playwright browser with video recording."""
+        if sync_playwright is None:
+            raise ImportError("Playwright is required for browser recording. Install with: pip install playwright")
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(
-            headless=self.config.headless,
-            slow_mo=self.config.slow_mo,
-        )
+        launch_args = {
+            "headless": self.config.headless,
+            "slow_mo": self.config.slow_mo,
+        }
+        if self.config.executable_path:
+            launch_args["executable_path"] = self.config.executable_path
+        self._browser = self._playwright.chromium.launch(**launch_args)
         
         # Prepare video directory
         video_dir = Path(self.config.video_dir)

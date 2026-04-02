@@ -1,0 +1,28 @@
+# Example workflow — add this to your repo's .github/workflows/
+# Runs RecordLoop on every PR that has session recordings.
+
+name: RecordLoop
+
+on:
+  pull_request:
+    paths:
+      - '.recordloop/sessions/**'
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: vihaanshahh/recordloop@main
+        with:
+          s3-bucket: ${{ secrets.RECORDLOOP_S3_BUCKET }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          # Optional: enable dashboard sync
+          # instantdb-app-id: ${{ secrets.RECORDLOOP_INSTANTDB_APP_ID }}
+          # instantdb-admin-token: ${{ secrets.RECORDLOOP_INSTANTDB_ADMIN_TOKEN }}

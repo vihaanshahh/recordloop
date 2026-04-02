@@ -3,9 +3,10 @@ __pycache__/
 *.pyo
 .env
 *.egg-info/
-dist/
-build/
+/dist/
+/build/
 .pytest_cache/
 test-videos/
 generated-tests/*.png
 generated-tests/*.json
+node_modules/
