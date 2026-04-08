@@ -105,7 +105,9 @@ _SYSTEM = (
     "Fewer, more targeted flows beat many generic ones.\n\n"
     "Selector priority: data-testid > id (#foo) > name attr > aria-label > "
     "visible text. Only include steps that will succeed on the real page. "
-    "Use realistic test data (real-looking emails, plausible names, etc.)."
+    "Use realistic test data (real-looking emails, plausible names, etc.).\n\n"
+    "For navigate steps: selector must be a URL path (e.g. '/' or '/pricing'), "
+    "NOT a CSS selector like 'body'. Use wait or hover for element interactions."
 )
 
 

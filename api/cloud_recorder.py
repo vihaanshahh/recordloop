@@ -95,6 +95,9 @@ def _execute(page, recorder, step: InteractionStep):
     match action:
         case "navigate":
             url = val or sel
+            # Guard against the LLM emitting a CSS selector instead of a URL.
+            if not url.startswith(("http://", "https://", "/")):
+                raise ValueError(f"navigate step has non-URL target {url!r} — skipping")
             page.goto(url, wait_until="domcontentloaded")
             recorder.record_navigate(url)
 

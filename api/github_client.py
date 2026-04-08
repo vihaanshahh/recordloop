@@ -113,11 +113,14 @@ async def upload_pr_video(repo: str, pr_number: int, file_path: str, token: str)
 async def _get_or_create_recordings_release(repo: str, token: str) -> Optional[int]:
     """Return the id of the 'recordloop-recordings' pre-release, creating it if needed."""
     tag = "recordloop-recordings"
+    tag_url = f"{_BASE}/repos/{repo}/releases/tags/{tag}"
+
     try:
-        release = await _get(f"{_BASE}/repos/{repo}/releases/tags/{tag}", token)
+        release = await _get(tag_url, token)
         return release["id"]
     except Exception:
         pass
+
     try:
         release = await _post(
             f"{_BASE}/repos/{repo}/releases",
@@ -130,6 +133,13 @@ async def _get_or_create_recordings_release(repo: str, token: str) -> Optional[i
                 "prerelease": True,
             },
         )
+        return release["id"]
+    except Exception:
+        # Parallel upload may have created it first (race) — retry the GET.
+        pass
+
+    try:
+        release = await _get(tag_url, token)
         return release["id"]
     except Exception as e:
         print(f"[github_client] could not get/create recordings release: {e}")
