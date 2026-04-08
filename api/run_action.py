@@ -46,6 +46,11 @@ def _emit_output(key: str, value: str) -> None:
         pass
 
 
+def _flow_title(name: str) -> str:
+    """Convert snake_case flow name to a readable Title Case heading."""
+    return name.replace("_", " ").title()
+
+
 def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
     if not flows:
         return (
@@ -53,12 +58,7 @@ def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
             "_No recordable UI changes detected in this PR._"
         )
 
-    lines = [
-        "## RecordLoop",
-        "",
-        "_AI-generated test flows for the changed UI in this PR_",
-        "",
-    ]
+    lines = ["## RecordLoop", ""]
 
     rec_by_name = {r.get("name"): r for r in (recordings or [])}
     has_video_without_url = False
@@ -68,68 +68,64 @@ def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
         actions_done = rec.get("actions") or 0
         status = rec.get("status") or ""
 
-        lines.append(f"### {f.name}")
+        # Heading: human title + source file
+        file_label = f" · `{f.component_file}`" if f.component_file else ""
+        lines.append(f"### {_flow_title(f.name)}{file_label}")
 
-        # Change context — what the reviewer should look for
+        # Single-sentence context (the "why" for the reviewer)
         if f.change_context:
-            lines.append(f"> {f.change_context}")
-            lines.append("")
-
-        lines.append(f"_{f.description}_")
+            lines.append(f.change_context)
         lines.append("")
 
         after_gif  = rec.get("gif_url") or ""
         before_gif = rec.get("before_gif_url") or ""
 
         if before_gif and after_gif:
-            # Side-by-side table — GitHub renders HTML tables in PR comments
             lines.append(
                 "<table><tr>"
-                "<th>Before (base branch)</th>"
-                "<th>After (this PR)</th>"
+                "<th>Before</th>"
+                "<th>After</th>"
                 "</tr><tr>"
                 f'<td><img src="{before_gif}" width="320" alt="before"/></td>'
                 f'<td><img src="{after_gif}"  width="320" alt="after"/></td>'
                 "</tr></table>"
             )
-            lines.append("")
-            lines.append(f"_🎥 {actions_done}/{len(f.steps)} steps recorded_")
         elif after_gif:
-            lines.append(f"![{f.name}]({after_gif})")
-            lines.append("")
-            lines.append(f"_🎥 {actions_done}/{len(f.steps)} steps recorded_")
+            lines.append(f"![{_flow_title(f.name)}]({after_gif})")
         elif rec.get("video_url"):
             lines.append(f"[▶ Watch recording]({rec['video_url']})")
-            lines.append("")
-            lines.append(f"_🎥 {actions_done}/{len(f.steps)} steps recorded_")
         elif rec.get("video"):
             has_video_without_url = True
-            lines.append(f"_🎥 {actions_done}/{len(f.steps)} steps recorded (see artifact below)_")
-        elif status == "failed":
-            lines.append(f"_❌ recording failed: {rec.get('error', '')}_")
-        else:
-            lines.append("_📋 planned (not recorded)_")
 
         lines.append("")
-        lines.append("<details><summary>Steps</summary>")
-        lines.append("")
-        for s in f.steps:
-            extra = f" — `{s.value}`" if s.value else ""
-            lines.append(f"1. **{s.action}** `{s.selector}`{extra}")
-        lines.append("")
-        lines.append("</details>")
+
+        # Steps in collapsible — count shown in summary so no separate badge needed
+        if status == "failed":
+            lines.append(f"_❌ recording failed: {rec.get('error', '')}_")
+        elif not rec and not preview_url and not _env("RECORDLOOP_DETECTED_URL"):
+            lines.append("_📋 planned (no preview URL configured)_")
+        else:
+            summary_label = (
+                f"🎥 {actions_done}/{len(f.steps)} steps recorded"
+                if (after_gif or rec.get("video_url") or rec.get("video"))
+                else f"{len(f.steps)} steps"
+            )
+            lines.append(f"<details><summary>{summary_label}</summary>")
+            lines.append("")
+            for s in f.steps:
+                extra = f" — `{s.value}`" if s.value else ""
+                lines.append(f"1. **{s.action}** `{s.selector}`{extra}")
+            lines.append("")
+            lines.append("</details>")
+
         lines.append("")
 
     workflow_run_url = _env("WORKFLOW_RUN_URL")
     if has_video_without_url and workflow_run_url:
-        lines.append("---")
-        lines.append("")
         lines.append(
-            f"📥 **[Download the recorded MP4s]({workflow_run_url}#artifacts)** "
-            f"(artifact: `recordloop-videos-pr-{_env('PR_NUMBER')}`, retained 14 days)"
+            f"📥 [Download recordings]({workflow_run_url}#artifacts) "
+            f"· artifact `recordloop-videos-pr-{_env('PR_NUMBER')}` · 14 days"
         )
-    elif not preview_url and not _env("RECORDLOOP_DETECTED_URL"):
-        lines.append("> ℹ️ No `preview-url` configured and `auto-start` is disabled — flows are listed but not recorded.")
 
     return "\n".join(lines)
 

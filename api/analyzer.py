@@ -104,10 +104,9 @@ _SYSTEM = (
     "  2. Call read_file only when the diff alone is insufficient to understand "
     "the surrounding structure (e.g. to find the selector for a new element).\n"
     "  3. Submit 1–3 tightly-scoped flows — one per distinct changed behavior. "
-    "Fewer, more targeted flows beat many generic ones. For each flow you MUST "
-    "populate change_context with exactly 2 plain-English sentences: the first "
-    "describing which specific diff change the flow exercises, the second "
-    "explaining what the flow verifies about it.\n\n"
+    "Fewer, more targeted flows beat many generic ones. For each flow, "
+    "change_context must be ONE sentence (max 20 words) naming the specific "
+    "diff change and what the flow confirms about it.\n\n"
     "Selector priority: data-testid > id (#foo) > name attr > aria-label > "
     "visible text. Only include steps that will succeed on the real page. "
     "Use realistic test data (real-looking emails, plausible names, etc.).\n\n"
@@ -304,9 +303,8 @@ _TOOLS: list[dict] = [
                                 "change_context": {
                                     "type": "string",
                                     "description": (
-                                        "Exactly 2 plain-English sentences. "
-                                        "Sentence 1: which specific diff change this flow exercises. "
-                                        "Sentence 2: what the flow verifies about it."
+                                        "One concise plain-English sentence (max 20 words) describing "
+                                        "the specific diff change this flow exercises and what it verifies."
                                     ),
                                 },
                                 "steps": {
