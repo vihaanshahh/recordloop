@@ -16,21 +16,29 @@ from .analyzer import InteractionFlow, InteractionStep
 VIDEO_DIR = "/tmp/recordloop-videos"
 
 
-def record_flows(flows: list[InteractionFlow], preview_url: str) -> list[dict]:
+def record_flows(
+    flows: list[InteractionFlow],
+    preview_url: str,
+    base_url: str = "",
+) -> list[dict]:
+    """Record each interaction flow against the preview (after) URL and optionally
+    the base (before) URL. Returns one result dict per flow; when base_url is
+    provided each dict also carries before_video / before_gif keys.
     """
-    Record each interaction flow with Playwright.
+    results = []
+    for flow in flows:
+        rec = _record_one(flow, preview_url, label="after")
+        if base_url:
+            before = _record_one(flow, base_url, label="before")
+            rec["before_video"]  = before.get("video")
+            rec["before_gif"]    = before.get("gif")
+            rec["before_status"] = before.get("status")
+            rec["before_error"]  = before.get("error")
+        results.append(rec)
+    return results
 
-    Returns a list of result dicts:
-      [{ name, description, status, video, video_url, actions, error }]
 
-    Playwright is imported lazily so the module can be loaded in environments
-    that don't have it installed (e.g. Tier-1 CI smoke jobs that never call
-    record_flows).
-    """
-    return [_record_one(flow, preview_url) for flow in flows]
-
-
-def _record_one(flow: InteractionFlow, preview_url: str) -> dict:
+def _record_one(flow: InteractionFlow, preview_url: str, label: str = "after") -> dict:
     # Lazy import — only pulled in when an actual recording is requested.
     from recordloop.capture.recorder import PlaywrightRecorder, RecorderConfig
 
@@ -38,7 +46,7 @@ def _record_one(flow: InteractionFlow, preview_url: str) -> dict:
         base_url=preview_url,
         video_dir=VIDEO_DIR,
         headless=True,
-        slow_mo=0,
+        slow_mo=200,
     )
 
     result = {
@@ -59,14 +67,14 @@ def _record_one(flow: InteractionFlow, preview_url: str) -> dict:
 
             page = recorder.start_recording(start)
             page.wait_for_load_state("domcontentloaded")
-            time.sleep(0.3)
+            time.sleep(0.8)
 
             recorded = 0
             for step in flow.steps:
                 try:
                     _execute(page, recorder, step)
                     recorded += 1
-                    time.sleep(0.25)
+                    time.sleep(0.8)
                 except Exception as e:
                     print(f"[cloud-recorder] step skipped ({step.action} {step.selector}): {e}")
 
@@ -75,7 +83,7 @@ def _record_one(flow: InteractionFlow, preview_url: str) -> dict:
             video_path = recorder.get_video_path()
             if video_path:
                 result["video"] = str(video_path)
-                gif_path = _make_preview_gif(Path(video_path))
+                gif_path = _make_preview_gif(Path(video_path), label=label)
                 if gif_path:
                     result["gif"] = str(gif_path)
 
@@ -141,13 +149,13 @@ _RE_NAME = re.compile(r"""\[name=['"]?([^'"\]]+)['"]?\]""")
 _RE_ARIA = re.compile(r"""\[aria-label=['"]?([^'"\]]+)['"]?\]""")
 
 
-def _make_preview_gif(mp4_path: Path) -> Optional[Path]:
+def _make_preview_gif(mp4_path: Path, label: str = "after") -> Optional[Path]:
     """Convert an MP4 to a palette-optimised GIF for inline GitHub markdown display.
 
     Caps at 20 s, 8 fps, 640 px wide — keeps file size reasonable while
     remaining readable in a PR comment.
     """
-    gif_path = mp4_path.with_suffix(".gif")
+    gif_path = mp4_path.with_name(f"{mp4_path.stem}-{label}.gif")
     try:
         result = subprocess.run(
             [

@@ -37,6 +37,7 @@ class InteractionFlow:
     component_file: str
     navigate_to: str = "/"
     steps: list[InteractionStep] = field(default_factory=list)
+    change_context: str = ""  # 2-sentence plain-English summary of the diff change this flow tests
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +63,7 @@ _DRY_RUN_FLOWS_PAYLOAD: dict = {
             "description": "Synthetic flow returned by RECORDLOOP_DRY_RUN — no LLM call was made",
             "component_file": "dry-run.tsx",
             "navigate_to": "/",
+            "change_context": "Dry-run flow — no real diff was analysed. This synthetic flow always navigates to the root page.",
             "steps": [
                 {
                     "action": "click",
@@ -102,7 +104,10 @@ _SYSTEM = (
     "  2. Call read_file only when the diff alone is insufficient to understand "
     "the surrounding structure (e.g. to find the selector for a new element).\n"
     "  3. Submit 1–3 tightly-scoped flows — one per distinct changed behavior. "
-    "Fewer, more targeted flows beat many generic ones.\n\n"
+    "Fewer, more targeted flows beat many generic ones. For each flow you MUST "
+    "populate change_context with exactly 2 plain-English sentences: the first "
+    "describing which specific diff change the flow exercises, the second "
+    "explaining what the flow verifies about it.\n\n"
     "Selector priority: data-testid > id (#foo) > name attr > aria-label > "
     "visible text. Only include steps that will succeed on the real page. "
     "Use realistic test data (real-looking emails, plausible names, etc.).\n\n"
@@ -296,6 +301,14 @@ _TOOLS: list[dict] = [
                                 "description": {"type": "string"},
                                 "component_file": {"type": "string"},
                                 "navigate_to": {"type": "string"},
+                                "change_context": {
+                                    "type": "string",
+                                    "description": (
+                                        "Exactly 2 plain-English sentences. "
+                                        "Sentence 1: which specific diff change this flow exercises. "
+                                        "Sentence 2: what the flow verifies about it."
+                                    ),
+                                },
                                 "steps": {
                                     "type": "array",
                                     "items": {
@@ -313,7 +326,7 @@ _TOOLS: list[dict] = [
                                     },
                                 },
                             },
-                            "required": ["name", "description", "component_file", "navigate_to", "steps"],
+                            "required": ["name", "description", "component_file", "navigate_to", "change_context", "steps"],
                         },
                     }
                 },
@@ -382,6 +395,7 @@ def _parse_flows(payload: dict) -> list[InteractionFlow]:
                 description=fd.get("description", ""),
                 component_file=fd.get("component_file", ""),
                 navigate_to=fd.get("navigate_to", "/"),
+                change_context=fd.get("change_context", ""),
                 steps=steps,
             )
         )
