@@ -62,6 +62,43 @@ async def post_pr_comment(repo: str, pr_number: int, body: str, token: str) -> d
     return await _post(url, token, {"body": body})
 
 
+async def upload_pr_video(repo: str, pr_number: int, file_path: str, token: str) -> Optional[str]:
+    """Upload a video file as a GitHub issue attachment. Returns the public URL or None."""
+    import mimetypes
+    import os
+
+    filename = os.path.basename(file_path)
+    content_type = mimetypes.guess_type(filename)[0] or "video/mp4"
+
+    def _do():
+        with open(file_path, "rb") as fh:
+            data = fh.read()
+        upload_url = (
+            f"https://uploads.github.com/repos/{repo}/issues/{pr_number}"
+            f"/assets?name={filename}"
+        )
+        req = urllib.request.Request(
+            upload_url,
+            data=data,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "Content-Type": content_type,
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            result = json.loads(resp.read())
+            return result.get("browser_download_url") or result.get("url")
+
+    try:
+        return await asyncio.to_thread(_do)
+    except Exception as e:
+        print(f"[github_client] video upload failed for {filename}: {e}")
+        return None
+
+
 async def _get(url: str, token: str) -> dict | list:
     def _do():
         req = urllib.request.Request(

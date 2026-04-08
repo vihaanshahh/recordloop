@@ -60,30 +60,33 @@ def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
     ]
 
     rec_by_name = {r.get("name"): r for r in (recordings or [])}
-    has_any_video = False
+    has_video_without_url = False
 
     for f in flows:
         rec = rec_by_name.get(f.name) or {}
-        # The runner-side recorder writes a local mp4 path; we don't have a
-        # public URL for it (the file gets uploaded as a workflow artifact in
-        # the next action step). For now we surface the local filename + an
-        # action-run-page link below the table.
+        video_url = rec.get("video_url") or ""
         video_local = rec.get("video") or ""
         actions_done = rec.get("actions") or 0
         status = rec.get("status") or ""
 
-        if video_local:
-            has_any_video = True
-            badge = f"🎥 {actions_done}/{len(f.steps)} steps recorded"
-        elif status == "failed":
-            badge = f"❌ recording failed: {rec.get('error', '')}"
-        else:
-            badge = "📋 planned (not recorded)"
-
         lines.append(f"### {f.name}")
         lines.append(f"_{f.description}_")
         lines.append("")
-        lines.append(f"{badge}")
+
+        if video_url:
+            # Embed video inline — GitHub renders <video> tags in issue comments
+            lines.append(f"<video src=\"{video_url}\" controls width=\"640\"></video>")
+            lines.append("")
+            lines.append(f"_🎥 {actions_done}/{len(f.steps)} steps recorded_")
+        elif video_local:
+            # Recorded but upload failed — fall back to artifact link
+            has_video_without_url = True
+            lines.append(f"_🎥 {actions_done}/{len(f.steps)} steps recorded (see artifact below)_")
+        elif status == "failed":
+            lines.append(f"_❌ recording failed: {rec.get('error', '')}_")
+        else:
+            lines.append("_📋 planned (not recorded)_")
+
         lines.append("")
         lines.append("<details><summary>Steps</summary>")
         lines.append("")
@@ -95,12 +98,12 @@ def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
         lines.append("")
 
     workflow_run_url = _env("WORKFLOW_RUN_URL")
-    if has_any_video and workflow_run_url:
+    if has_video_without_url and workflow_run_url:
         lines.append("---")
         lines.append("")
         lines.append(
             f"📥 **[Download the recorded MP4s]({workflow_run_url}#artifacts)** "
-            f"from the workflow run (artifact: `recordloop-videos-pr-N`, retained 14 days)."
+            f"(artifact: `recordloop-videos-pr-{_env('PR_NUMBER')}`, retained 14 days)"
         )
     elif not preview_url and not _env("RECORDLOOP_DETECTED_URL"):
         lines.append("> ℹ️ No `preview-url` configured and `auto-start` is disabled — flows are listed but not recorded.")
@@ -133,7 +136,7 @@ async def main() -> int:
 
     # Lazy imports keep cold-start fast and prove the lazy chain still works.
     from api.analyzer import analyze_pr
-    from api.github_client import get_pr_files, post_pr_comment
+    from api.github_client import get_pr_files, post_pr_comment, upload_pr_video
 
     # 1. Fetch the diff
     try:
@@ -176,6 +179,21 @@ async def main() -> int:
             print(f"  recorded {ok}/{len(recordings)} flow(s) with Playwright")
         except Exception as e:
             print(f"RecordLoop: recording skipped — {e}", file=sys.stderr)
+
+    # 3b. Upload videos to GitHub so they appear inline in the PR comment
+    if recordings:
+        recs_with_video = [r for r in recordings if r.get("video")]
+        if recs_with_video:
+            upload_results = await asyncio.gather(
+                *[upload_pr_video(repo, pr_number, r["video"], github_token) for r in recs_with_video],
+                return_exceptions=True,
+            )
+            for rec, url in zip(recs_with_video, upload_results):
+                if isinstance(url, str):
+                    rec["video_url"] = url
+                    print(f"  uploaded video for '{rec['name']}' → {url}")
+                else:
+                    print(f"  video upload failed for '{rec['name']}': {url}", file=sys.stderr)
 
     # 4. Post the comment
     body = _render_comment(flows, preview_url, recordings)

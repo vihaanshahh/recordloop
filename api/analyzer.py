@@ -83,23 +83,29 @@ def _dry_run_enabled() -> bool:
 # ---------------------------------------------------------------------------
 
 _SYSTEM = (
-    "You are a frontend QA expert. You are reviewing a pull request and "
-    "generating realistic Playwright interaction flows for the changed UI. "
+    "You are a frontend QA expert reviewing a pull request. Your job is to "
+    "generate Playwright interaction flows that test the SPECIFIC UI changes "
+    "introduced by this PR — not a general tour of the component.\n\n"
     "The PR may touch React, Vue, Svelte, Angular, Astro, Blazor, Razor / "
     "ASP.NET, plain HTML, or any server-rendered template (ERB, Jinja, Twig, "
     "Handlebars, Liquid, Phoenix LiveView, PHP, …). Recording is browser-only, "
     "so reason about the rendered HTML — not the source language.\n\n"
-    "You have tools to inspect the PR. Strategy:\n"
-    "  1. Look at the file overview you receive first.\n"
-    "  2. Use read_file / read_diff on whichever files matter for understanding "
-    "the user-visible behavior. Read related non-UI files (utilities, API "
-    "routes) when they help you understand what the form posts to or what "
-    "state the page expects.\n"
-    "  3. When you have enough context, call submit_flows with 1–5 flows.\n\n"
-    "Selector priority for the flows you submit: data-testid > id (#foo) > "
-    "name attr > aria-label > text content. Only include steps that are "
-    "likely to succeed against the real rendered component. Use realistic "
-    "test data (real-looking emails, plausible plan names, etc.)."
+    "CRITICAL — focus on what changed:\n"
+    "  • If a new button/form/modal was ADDED → test that specific element.\n"
+    "  • If a field was CHANGED (label, validation, options) → test that change.\n"
+    "  • If something was REMOVED → verify it no longer appears (navigate + wait).\n"
+    "  Do NOT write generic smoke tests for parts of the component that were "
+    "not touched in this PR.\n\n"
+    "Workflow:\n"
+    "  1. Call read_diff on every UI file listed. Understand exactly which "
+    "lines were added (+) or removed (-) and what HTML/JSX they produce.\n"
+    "  2. Call read_file only when the diff alone is insufficient to understand "
+    "the surrounding structure (e.g. to find the selector for a new element).\n"
+    "  3. Submit 1–3 tightly-scoped flows — one per distinct changed behavior. "
+    "Fewer, more targeted flows beat many generic ones.\n\n"
+    "Selector priority: data-testid > id (#foo) > name attr > aria-label > "
+    "visible text. Only include steps that will succeed on the real page. "
+    "Use realistic test data (real-looking emails, plausible names, etc.)."
 )
 
 
@@ -470,7 +476,9 @@ def analyze_pr(
     user_message = (
         f"Pull request opened against preview URL: {preview_url or '(none)'}\n\n"
         f"{overview}\n\n"
-        "Inspect what you need with the tools, then call submit_flows."
+        "Start by calling read_diff on the UI files above. Find exactly what "
+        "lines were added or changed. Then generate 1–3 flows that test those "
+        "specific changes. Call submit_flows when done."
     )
 
     messages: list[dict] = [
