@@ -1,6 +1,6 @@
 {
   "name": "recordloop",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "description": "Capture browser interactions from any frontend — replay with Playwright, generate tests, record video.",
   "main": "dist/recordloop.js",
   "module": "src/index.js",

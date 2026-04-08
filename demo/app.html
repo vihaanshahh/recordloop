@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RecordLoop Demo App</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f0f11;
+      color: #e8e8ed;
+      min-height: 100vh;
+      padding: 40px 24px;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+    header h1 { font-size: 2rem; font-weight: 700; letter-spacing: -0.5px; }
+    header p { color: #888; margin-top: 8px; font-size: 0.95rem; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background: #1a1a1f;
+      border: 1px solid #2a2a35;
+      border-radius: 14px;
+      padding: 28px;
+    }
+    .card h2 { font-size: 1rem; font-weight: 600; color: #aaa; margin-bottom: 20px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+    /* Counter */
+    .counter-display {
+      font-size: 4rem;
+      font-weight: 800;
+      text-align: center;
+      margin: 16px 0;
+      color: #7c6ef5;
+    }
+    .counter-btns { display: flex; gap: 12px; }
+    .btn {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      border-radius: 10px;
+      font-size: 1.2rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.1s, background 0.15s;
+    }
+    .btn:active { transform: scale(0.96); }
+    .btn-dec { background: #2a2a35; color: #e8e8ed; }
+    .btn-dec:hover { background: #353545; }
+    .btn-inc { background: #7c6ef5; color: white; }
+    .btn-inc:hover { background: #6a5de0; }
+    .btn-reset { background: #2a2a35; color: #888; font-size: 0.85rem; margin-top: 10px; width: 100%; padding: 8px; }
+
+    /* Todo */
+    .todo-input-row { display: flex; gap: 8px; margin-bottom: 16px; }
+    .todo-input-row input {
+      flex: 1;
+      background: #0f0f11;
+      border: 1px solid #2a2a35;
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: #e8e8ed;
+      font-size: 0.9rem;
+      outline: none;
+    }
+    .todo-input-row input:focus { border-color: #7c6ef5; }
+    .btn-add { background: #7c6ef5; color: white; border-radius: 8px; padding: 10px 16px; font-size: 0.9rem; font-weight: 600; }
+    .btn-add:hover { background: #6a5de0; }
+    .todo-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+    .todo-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: #0f0f11;
+      border: 1px solid #2a2a35;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 0.9rem;
+    }
+    .todo-item input[type=checkbox] { accent-color: #7c6ef5; width: 16px; height: 16px; cursor: pointer; }
+    .todo-item.done span { text-decoration: line-through; color: #555; }
+    .todo-empty { color: #555; font-size: 0.85rem; text-align: center; padding: 16px 0; }
+
+    /* Form */
+    .form-group { margin-bottom: 14px; }
+    .form-group label { display: block; font-size: 0.8rem; color: #888; margin-bottom: 6px; }
+    .form-group input, .form-group select, .form-group textarea {
+      width: 100%;
+      background: #0f0f11;
+      border: 1px solid #2a2a35;
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: #e8e8ed;
+      font-size: 0.9rem;
+      outline: none;
+      font-family: inherit;
+    }
+    .form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: #7c6ef5; }
+    .form-group select { cursor: pointer; }
+    .form-group textarea { resize: vertical; min-height: 80px; }
+    .btn-submit { width: 100%; background: #7c6ef5; color: white; border-radius: 10px; padding: 12px; font-size: 0.95rem; font-weight: 600; margin-top: 4px; }
+    .btn-submit:hover { background: #6a5de0; }
+    .success-msg {
+      display: none;
+      margin-top: 14px;
+      background: #0d2e1a;
+      border: 1px solid #1a6640;
+      border-radius: 8px;
+      padding: 12px 16px;
+      color: #4ade80;
+      font-size: 0.9rem;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>RecordLoop Demo</h1>
+    <p>Interact with anything — every action is captured</p>
+  </header>
+
+  <div class="grid">
+    <!-- Counter -->
+    <div class="card">
+      <h2>Counter</h2>
+      <div class="counter-display" id="counter-value">0</div>
+      <div class="counter-btns">
+        <button class="btn btn-dec" id="decrement-btn">−</button>
+        <button class="btn btn-inc" id="increment-btn">+</button>
+      </div>
+      <button class="btn btn-reset" id="reset-btn">Reset</button>
+    </div>
+
+    <!-- Todo list -->
+    <div class="card">
+      <h2>Tasks</h2>
+      <div class="todo-input-row">
+        <input type="text" id="todo-input" placeholder="Add a task…" />
+        <button class="btn btn-add" id="add-todo-btn">Add</button>
+      </div>
+      <ul class="todo-list" id="todo-list">
+        <li class="todo-empty" id="todo-empty">No tasks yet</li>
+      </ul>
+    </div>
+
+    <!-- Contact form -->
+    <div class="card">
+      <h2>Contact</h2>
+      <div class="form-group">
+        <label>Name</label>
+        <input type="text" id="name-input" placeholder="Your name" />
+      </div>
+      <div class="form-group">
+        <label>Email</label>
+        <input type="email" id="email-input" placeholder="you@example.com" />
+      </div>
+      <div class="form-group">
+        <label>Topic</label>
+        <select id="topic-select">
+          <option value="">Select…</option>
+          <option value="bug">Bug report</option>
+          <option value="feature">Feature request</option>
+          <option value="feedback">General feedback</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Message</label>
+        <textarea id="message-input" placeholder="Tell us more…"></textarea>
+      </div>
+      <button class="btn btn-submit" id="submit-form-btn">Send message</button>
+      <div class="success-msg" id="success-message">Message sent! We'll get back to you soon.</div>
+    </div>
+  </div>
+
+  <script>
+    // Counter
+    let count = 0;
+    const display = document.getElementById('counter-value');
+    document.getElementById('increment-btn').onclick = () => { count++; display.textContent = count; };
+    document.getElementById('decrement-btn').onclick = () => { count--; display.textContent = count; };
+    document.getElementById('reset-btn').onclick = () => { count = 0; display.textContent = 0; };
+
+    // Todo
+    const todoInput = document.getElementById('todo-input');
+    const todoList = document.getElementById('todo-list');
+    const todoEmpty = document.getElementById('todo-empty');
+    let todos = [];
+
+    function renderTodos() {
+      todoEmpty.style.display = todos.length ? 'none' : 'block';
+      const existing = todoList.querySelectorAll('.todo-item');
+      existing.forEach(el => el.remove());
+      todos.forEach((t, i) => {
+        const li = document.createElement('li');
+        li.className = 'todo-item' + (t.done ? ' done' : '');
+        li.innerHTML = `<input type="checkbox" ${t.done ? 'checked' : ''} data-testid="todo-check-${i}"><span>${t.text}</span>`;
+        li.querySelector('input').onchange = (e) => { todos[i].done = e.target.checked; renderTodos(); };
+        todoList.appendChild(li);
+      });
+    }
+
+    document.getElementById('add-todo-btn').onclick = () => {
+      const text = todoInput.value.trim();
+      if (!text) return;
+      todos.push({ text, done: false });
+      todoInput.value = '';
+      renderTodos();
+    };
+    todoInput.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('add-todo-btn').click(); });
+
+    // Form
+    document.getElementById('submit-form-btn').onclick = () => {
+      const name = document.getElementById('name-input').value.trim();
+      const email = document.getElementById('email-input').value.trim();
+      if (!name || !email) return;
+      document.getElementById('success-message').style.display = 'block';
+      document.getElementById('name-input').value = '';
+      document.getElementById('email-input').value = '';
+      document.getElementById('topic-select').value = '';
+      document.getElementById('message-input').value = '';
+    };
+  </script>
+</body>
+</html>

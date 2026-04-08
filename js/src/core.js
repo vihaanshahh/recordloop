@@ -44,51 +44,33 @@ const DEFAULT_OPTIONS = {
 }
 
 /**
- * Build a CSS selector path for an element.
- * Prefers: data-testid > id > name attr > nth-child path.
+ * Detect auto-generated ids that are not meaningful for stable selectors.
+ * Patterns: starts with "react-", is purely hex, contains "__", or is just digits.
  */
-function getSelector(el) {
-  if (!el || el === document.body || el === document.documentElement) {
-    return 'body'
-  }
+function _isAutoId(id) {
+  if (!id) return true
+  if (/^react-/.test(id)) return true
+  if (/^[0-9a-f]{8,}$/i.test(id)) return true
+  if (id.includes('__')) return true
+  if (/^\d+$/.test(id)) return true
+  return false
+}
 
-  // data-testid (best practice in React/Vue/etc.)
-  const testId = el.getAttribute('data-testid') || el.getAttribute('data-test-id')
-  if (testId) return `[data-testid="${testId}"]`
-
-  // id
-  if (el.id) return `#${CSS.escape(el.id)}`
-
-  // name attribute (forms)
-  if (el.name && el.tagName !== 'DIV') {
-    const tag = el.tagName.toLowerCase()
-    return `${tag}[name="${el.name}"]`
-  }
-
-  // aria-label
-  const ariaLabel = el.getAttribute('aria-label')
-  if (ariaLabel) {
-    const tag = el.tagName.toLowerCase()
-    return `${tag}[aria-label="${ariaLabel}"]`
-  }
-
-  // role + text content (buttons, links)
-  const role = el.getAttribute('role') || (el.tagName === 'BUTTON' ? 'button' : null)
-  if (role && el.textContent && el.textContent.trim().length < 50) {
-    return `${el.tagName.toLowerCase()}:has-text("${el.textContent.trim()}")`
-  }
-
-  // Build nth-child path (fallback)
+/**
+ * Build a minimal nth-child xpath path for an element (fallback strategy).
+ * Returns a string like: div[1]/span[2]/button[1]
+ */
+function _buildXPath(el) {
   const parts = []
   let current = el
-  while (current && current !== document.body) {
+  while (current && current !== document.body && current !== document.documentElement) {
     const tag = current.tagName.toLowerCase()
     const parent = current.parentElement
     if (parent) {
       const siblings = Array.from(parent.children).filter(c => c.tagName === current.tagName)
       if (siblings.length > 1) {
         const idx = siblings.indexOf(current) + 1
-        parts.unshift(`${tag}:nth-child(${idx})`)
+        parts.unshift(`${tag}[${idx}]`)
       } else {
         parts.unshift(tag)
       }
@@ -96,10 +78,62 @@ function getSelector(el) {
       parts.unshift(tag)
     }
     current = parent
-    // Keep paths reasonable
     if (parts.length >= 4) break
   }
-  return parts.join(' > ')
+  return '//' + parts.join('/')
+}
+
+/**
+ * Return a semantic key object describing how to uniquely identify an element.
+ *
+ * Strategy priority: testid > id > name > aria_label > role_text > xpath
+ *
+ * Returns: { strategy: string, value: string, tag: string, text: string|null }
+ *
+ * IMPORTANT: `value` never contains Playwright pseudo-syntax like :has-text().
+ * For role_text the value is the plain text content of the element.
+ */
+function getSemanticKey(el) {
+  if (!el || el === document.body || el === document.documentElement) {
+    return { strategy: 'xpath', value: '//body', tag: 'body', text: null }
+  }
+
+  const tag = el.tagName.toLowerCase()
+  const rawText = el.textContent ? el.textContent.trim() : null
+  const text = rawText && rawText.length > 0 ? rawText.slice(0, 200) : null
+
+  // strategy: testid
+  const testId = el.getAttribute('data-testid') || el.getAttribute('data-test-id')
+  if (testId) {
+    return { strategy: 'testid', value: testId, tag, text }
+  }
+
+  // strategy: id (skip auto-generated ids)
+  if (el.id && !_isAutoId(el.id)) {
+    return { strategy: 'id', value: el.id, tag, text }
+  }
+
+  // strategy: name (forms — skip divs which sometimes have name)
+  if (el.getAttribute('name') && tag !== 'div') {
+    return { strategy: 'name', value: el.getAttribute('name'), tag, text }
+  }
+
+  // strategy: aria_label
+  const ariaLabel = el.getAttribute('aria-label')
+  if (ariaLabel) {
+    return { strategy: 'aria_label', value: ariaLabel, tag, text }
+  }
+
+  // strategy: role_text
+  // Applies when element has explicit role, OR is a button/anchor/heading with short text
+  const role = el.getAttribute('role')
+  const isSemanticTag = ['button', 'a', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tag)
+  if ((role || isSemanticTag) && text && text.length <= 50) {
+    return { strategy: 'role_text', value: text, tag, text }
+  }
+
+  // strategy: xpath (fallback)
+  return { strategy: 'xpath', value: _buildXPath(el), tag, text }
 }
 
 /**
@@ -114,26 +148,51 @@ function getLabel(el) {
 }
 
 /**
+ * Short UUID for individual actions.
+ */
+function _shortUid() {
+  return Math.random().toString(36).slice(2, 9)
+}
+
+/**
+ * Full session UUID.
+ */
+function _uid() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
+}
+
+/**
  * Core recorder class.
  */
 export class RecordLoop {
   constructor(options = {}) {
     this.options = { ...DEFAULT_OPTIONS, ...options }
     this.actions = []
-    this.recording = false
+    this._recording = false
     this.sessionId = null
     this.startedAt = null
     this._listeners = []
     this._scrollTimer = null
     this._inputTimers = new Map()
+    this._navHandler = null
+    this._navTarget = null
+    this._origPushState = null
+    this._origReplaceState = null
+  }
+
+  /**
+   * Public recording state (read-only).
+   */
+  get recording() {
+    return this._recording
   }
 
   /**
    * Start recording interactions.
    */
   start() {
-    if (this.recording) return this
-    this.recording = true
+    if (this._recording) return this
+    this._recording = true
     this.actions = []
     this.sessionId = _uid()
     this.startedAt = Date.now()
@@ -141,6 +200,7 @@ export class RecordLoop {
     // Record initial navigation
     this._push({
       type: 'navigate',
+      key: null,
       value: window.location.href,
     })
 
@@ -152,14 +212,10 @@ export class RecordLoop {
     }
     if (this.options.navigation) {
       this._listen('popstate', this._onNav)
+      this._attachNavigationListener()
     }
     if (this.options.scroll) {
       this._listen('scroll', this._onScroll, true)
-    }
-
-    // Intercept pushState/replaceState for SPA navigation
-    if (this.options.navigation) {
-      this._patchHistory()
     }
 
     return this
@@ -169,21 +225,18 @@ export class RecordLoop {
    * Stop recording, return the session.
    */
   stop() {
-    if (!this.recording) return null
-    this.recording = false
+    if (!this._recording) return null
+    this._recording = false
 
-    // Remove listeners
+    // Remove DOM listeners
     for (const { target, event, handler, capture } of this._listeners) {
       target.removeEventListener(event, handler, capture)
     }
     this._listeners = []
 
-    // Restore history
-    if (this._origPushState) {
-      history.pushState = this._origPushState
-      history.replaceState = this._origReplaceState
-      this._origPushState = null
-      this._origReplaceState = null
+    // Detach navigation listener
+    if (this.options.navigation) {
+      this._detachNavigationListener()
     }
 
     const session = this.getSession()
@@ -202,21 +255,20 @@ export class RecordLoop {
   }
 
   /**
-   * Get the current session data.
+   * Get the current session data (schema version 2).
    */
   getSession() {
+    const now = Date.now()
     return {
       id: this.sessionId,
-      url: window.location.href,
-      startedAt: this.startedAt,
-      duration: Date.now() - this.startedAt,
-      userAgent: navigator.userAgent,
-      viewport: {
-        width: window.innerWidth,
-        height: window.innerHeight,
-      },
-      actions: [...this.actions],
+      recorded_at: new Date(this.startedAt).toISOString(),
+      duration_ms: now - this.startedAt,
+      base_url: window.location.origin,
+      viewport: [window.innerWidth, window.innerHeight],
+      user_agent: navigator.userAgent,
+      schema_version: '2',
       meta: this.options.meta,
+      actions: [...this.actions],
     }
   }
 
@@ -233,20 +285,27 @@ export class RecordLoop {
     const el = e.target
     if (this._shouldIgnore(el)) return
 
+    const key = getSemanticKey(el)
+
     const action = {
       type: 'click',
-      selector: getSelector(el),
-      label: getLabel(el),
-      tag: el.tagName.toLowerCase(),
+      key,
+      value: null,
       position: { x: e.clientX, y: e.clientY },
     }
 
-    // Detect double-click (two clicks within 300ms on same selector)
+    // Detect double-click (two clicks within 300ms on same element key value)
     const prev = this.actions[this.actions.length - 1]
-    if (prev && prev.type === 'click' && prev.selector === action.selector) {
-      const gap = Date.now() - this.startedAt - prev.timestamp * 1000
+    if (
+      prev &&
+      prev.type === 'click' &&
+      prev.key &&
+      key &&
+      prev.key.strategy === key.strategy &&
+      prev.key.value === key.value
+    ) {
+      const gap = (Date.now() - this.startedAt) - prev.timestamp_ms
       if (gap < 300) {
-        // Convert previous click to double_click
         this.actions[this.actions.length - 1].type = 'double_click'
         return
       }
@@ -259,19 +318,27 @@ export class RecordLoop {
     const el = e.target
     if (this._shouldIgnore(el)) return
 
-    const selector = getSelector(el)
+    const key = getSemanticKey(el)
+    // Use a stable string for debounce map keying
+    const keyStr = `${key.strategy}::${key.value}`
 
     // Debounce input events per element — we want the final value, not each keystroke
-    if (this._inputTimers.has(selector)) {
-      clearTimeout(this._inputTimers.get(selector))
+    if (this._inputTimers.has(keyStr)) {
+      clearTimeout(this._inputTimers.get(keyStr))
     }
 
-    this._inputTimers.set(selector, setTimeout(() => {
-      this._inputTimers.delete(selector)
+    this._inputTimers.set(keyStr, setTimeout(() => {
+      this._inputTimers.delete(keyStr)
 
-      // Remove any pending type action for this selector
+      // Remove any pending type action for this element key
       for (let i = this.actions.length - 1; i >= 0; i--) {
-        if (this.actions[i].type === 'type' && this.actions[i].selector === selector) {
+        const a = this.actions[i]
+        if (
+          a.type === 'type' &&
+          a.key &&
+          a.key.strategy === key.strategy &&
+          a.key.value === key.value
+        ) {
           this.actions.splice(i, 1)
           break
         }
@@ -279,9 +346,8 @@ export class RecordLoop {
 
       this._push({
         type: 'type',
-        selector,
+        key,
         value: el.value,
-        tag: el.tagName.toLowerCase(),
         inputType: el.type || 'text',
       })
     }, 300))
@@ -292,33 +358,39 @@ export class RecordLoop {
     if (this._shouldIgnore(el)) return
 
     const tag = el.tagName.toLowerCase()
-    const selector = getSelector(el)
+    const key = getSemanticKey(el)
 
     if (tag === 'select') {
       this._push({
         type: 'select',
-        selector,
+        key,
         value: el.value,
-        label: el.options[el.selectedIndex]?.text,
+        label: el.options[el.selectedIndex]?.text || null,
       })
     } else if (el.type === 'checkbox') {
       this._push({
         type: el.checked ? 'check' : 'uncheck',
-        selector,
+        key,
+        value: null,
       })
     } else if (el.type === 'radio') {
       this._push({
         type: 'check',
-        selector,
+        key,
         value: el.value,
       })
     }
   }
 
   _onNav = () => {
+    this._captureNavigation(window.location.href)
+  }
+
+  _captureNavigation(url) {
     this._push({
       type: 'navigate',
-      value: window.location.href,
+      key: null,
+      value: url,
     })
   }
 
@@ -327,12 +399,40 @@ export class RecordLoop {
     this._scrollTimer = setTimeout(() => {
       this._push({
         type: 'scroll',
+        key: null,
+        value: null,
         position: { x: window.scrollX, y: window.scrollY },
       })
     }, this.options.debounceMs)
   }
 
-  // --- Internals ---
+  // --- Navigation API ---
+
+  _attachNavigationListener() {
+    if ('navigation' in window) {
+      // Navigation API (Chrome 102+)
+      const handler = (event) => {
+        if (!this._recording) return
+        this._captureNavigation(event.destination.url)
+      }
+      window.navigation.addEventListener('navigate', handler)
+      this._navHandler = handler
+      this._navTarget = window.navigation
+    } else {
+      // Fallback: patch history for older browsers
+      this._patchHistory()
+    }
+  }
+
+  _detachNavigationListener() {
+    if (this._navTarget && this._navHandler) {
+      this._navTarget.removeEventListener('navigate', this._navHandler)
+      this._navHandler = null
+      this._navTarget = null
+    } else {
+      this._unpatchHistory()
+    }
+  }
 
   _patchHistory() {
     this._origPushState = history.pushState
@@ -349,12 +449,40 @@ export class RecordLoop {
     }
   }
 
+  _unpatchHistory() {
+    if (this._origPushState) {
+      history.pushState = this._origPushState
+      history.replaceState = this._origReplaceState
+      this._origPushState = null
+      this._origReplaceState = null
+    }
+  }
+
+  // --- Internals ---
+
   _push(action) {
-    if (!this.recording) return
+    if (!this._recording) return
     if (this.options.maxActions && this.actions.length >= this.options.maxActions) return
 
-    action.timestamp = (Date.now() - this.startedAt) / 1000
-    this.actions.push(action)
+    const timestamp_ms = Date.now() - this.startedAt
+
+    // Build the action record with stable schema fields first, then let
+    // caller-supplied fields (position, inputType, label, etc.) augment it.
+    // id and timestamp_ms are always set last so caller cannot accidentally
+    // override them.
+    const { type, key, value, ...rest } = action
+    const full = {
+      type,
+      key: key !== undefined ? key : null,
+      value: value !== undefined ? value : null,
+      page_url: window.location.href,
+      page_title: document.title || null,
+      ...rest,
+      id: _shortUid(),
+      timestamp_ms,
+    }
+
+    this.actions.push(full)
   }
 
   _listen(event, handler, capture = false) {
@@ -396,13 +524,14 @@ export class RecordLoop {
           steps: [
             ['update', 'sessions', session.id, {
               sessionId: session.id,
-              url: session.url,
+              baseUrl: session.base_url,
               actionCount: session.actions.length,
-              durationMs: session.duration,
+              durationMs: session.duration_ms,
               status: 'recorded',
               viewport: JSON.stringify(session.viewport),
-              userAgent: session.userAgent,
-              createdAt: session.startedAt,
+              userAgent: session.user_agent,
+              recordedAt: session.recorded_at,
+              schemaVersion: session.schema_version,
             }],
           ],
         }),
@@ -427,10 +556,6 @@ export class RecordLoop {
     URL.revokeObjectURL(url)
     return session
   }
-}
-
-function _uid() {
-  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
 }
 
 export default RecordLoop
