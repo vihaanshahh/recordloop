@@ -195,11 +195,25 @@ runs:
         MODEL: ${{ inputs.model }}
         PREVIEW_URL: ${{ inputs.preview-url }}
         ACTION_PATH: ${{ github.action_path }}
+        # Threaded into the PR comment so users can click straight to the
+        # workflow run page where the video artifact is downloadable.
+        WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
         if [ -z "${{ github.event.pull_request.number }}" ]; then
           echo "RecordLoop: not a pull_request event, skipping."
           exit 0
         fi
         # Add the action's own checkout to PYTHONPATH so we can import api.*
-        export PYTHONPATH="${ACTION_PATH}:${PYTHONPATH}"
+        # AND src/ so cloud_recorder.py can import recordloop.capture.recorder
+        # (the analyzer doesn't need it; only the recorder does).
+        export PYTHONPATH="${ACTION_PATH}:${ACTION_PATH}/src:${PYTHONPATH}"
         python "${ACTION_PATH}/api/run_action.py"
+
+    - name: Upload recorded videos as workflow artifact
+      if: always() && (inputs.preview-url != '' || inputs.auto-start != 'false')
+      uses: actions/upload-artifact@v4
+      with:
+        name: recordloop-videos-pr-${{ github.event.pull_request.number }}
+        path: /tmp/recordloop-videos/*.mp4
+        if-no-files-found: ignore
+        retention-days: 14

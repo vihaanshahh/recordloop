@@ -60,16 +60,30 @@ def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
     ]
 
     rec_by_name = {r.get("name"): r for r in (recordings or [])}
+    has_any_video = False
 
     for f in flows:
         rec = rec_by_name.get(f.name) or {}
-        video_url = rec.get("video_url") or rec.get("video") or ""
+        # The runner-side recorder writes a local mp4 path; we don't have a
+        # public URL for it (the file gets uploaded as a workflow artifact in
+        # the next action step). For now we surface the local filename + an
+        # action-run-page link below the table.
+        video_local = rec.get("video") or ""
+        actions_done = rec.get("actions") or 0
+        status = rec.get("status") or ""
 
-        if video_url:
-            lines.append(f"### [▶ {f.name}]({video_url})")
+        if video_local:
+            has_any_video = True
+            badge = f"🎥 {actions_done}/{len(f.steps)} steps recorded"
+        elif status == "failed":
+            badge = f"❌ recording failed: {rec.get('error', '')}"
         else:
-            lines.append(f"### {f.name}")
+            badge = "📋 planned (not recorded)"
+
+        lines.append(f"### {f.name}")
         lines.append(f"_{f.description}_")
+        lines.append("")
+        lines.append(f"{badge}")
         lines.append("")
         lines.append("<details><summary>Steps</summary>")
         lines.append("")
@@ -80,8 +94,17 @@ def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
         lines.append("</details>")
         lines.append("")
 
-    if not preview_url:
-        lines.append("> ℹ️ No `PREVIEW_URL` configured — flows are listed but not recorded.")
+    workflow_run_url = _env("WORKFLOW_RUN_URL")
+    if has_any_video and workflow_run_url:
+        lines.append("---")
+        lines.append("")
+        lines.append(
+            f"📥 **[Download the recorded MP4s]({workflow_run_url}#artifacts)** "
+            f"from the workflow run (artifact: `recordloop-videos-pr-N`, retained 14 days)."
+        )
+    elif not preview_url and not _env("RECORDLOOP_DETECTED_URL"):
+        lines.append("> ℹ️ No `preview-url` configured and `auto-start` is disabled — flows are listed but not recorded.")
+
     return "\n".join(lines)
 
 
