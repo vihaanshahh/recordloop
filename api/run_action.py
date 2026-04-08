@@ -73,9 +73,15 @@ def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
         lines.append(f"_{f.description}_")
         lines.append("")
 
-        if video_url:
-            # Embed video inline — GitHub renders <video> tags in issue comments
-            lines.append(f"<video src=\"{video_url}\" controls width=\"640\"></video>")
+        gif_url = rec.get("gif_url") or ""
+
+        if gif_url:
+            # GIFs render inline in GitHub markdown everywhere
+            lines.append(f"![{f.name}]({gif_url})")
+            lines.append("")
+            lines.append(f"_🎥 {actions_done}/{len(f.steps)} steps recorded_")
+        elif video_url:
+            lines.append(f"[▶ Watch recording]({video_url})")
             lines.append("")
             lines.append(f"_🎥 {actions_done}/{len(f.steps)} steps recorded_")
         elif video_local:
@@ -180,20 +186,23 @@ async def main() -> int:
         except Exception as e:
             print(f"RecordLoop: recording skipped — {e}", file=sys.stderr)
 
-    # 3b. Upload videos to GitHub so they appear inline in the PR comment
+    # 3b. Upload GIFs (preferred for inline display) or MP4s to GitHub releases
     if recordings:
-        recs_with_video = [r for r in recordings if r.get("video")]
-        if recs_with_video:
+        # Prefer GIF for inline display; fall back to MP4 if GIF wasn't created
+        recs_to_upload = [(r, r.get("gif") or r.get("video")) for r in recordings]
+        recs_to_upload = [(r, p) for r, p in recs_to_upload if p]
+        if recs_to_upload:
             upload_results = await asyncio.gather(
-                *[upload_pr_video(repo, pr_number, r["video"], github_token) for r in recs_with_video],
+                *[upload_pr_video(repo, pr_number, path, github_token) for _, path in recs_to_upload],
                 return_exceptions=True,
             )
-            for rec, url in zip(recs_with_video, upload_results):
+            for (rec, path), url in zip(recs_to_upload, upload_results):
                 if isinstance(url, str):
-                    rec["video_url"] = url
-                    print(f"  uploaded video for '{rec['name']}' → {url}")
+                    key = "gif_url" if path == rec.get("gif") else "video_url"
+                    rec[key] = url
+                    print(f"  uploaded {'GIF' if key == 'gif_url' else 'video'} for '{rec['name']}' → {url}")
                 else:
-                    print(f"  video upload failed for '{rec['name']}': {url}", file=sys.stderr)
+                    print(f"  upload failed for '{rec['name']}': {url}", file=sys.stderr)
 
     # 4. Post the comment
     body = _render_comment(flows, preview_url, recordings)

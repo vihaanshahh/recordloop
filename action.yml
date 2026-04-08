@@ -232,5 +232,6 @@ runs:
         path: |
           /tmp/recordloop-videos/*.mp4
           /tmp/recordloop-videos/*.webm
+          /tmp/recordloop-videos/*.gif
         if-no-files-found: ignore
         retention-days: 14
