@@ -73,6 +73,8 @@ async def upload_pr_video(repo: str, pr_number: int, file_path: str, token: str)
     def _do():
         with open(file_path, "rb") as fh:
             data = fh.read()
+        # uploads.github.com uses `token` auth (not Bearer) and does not
+        # accept the X-GitHub-Api-Version header.
         upload_url = (
             f"https://uploads.github.com/repos/{repo}/issues/{pr_number}"
             f"/assets?name={filename}"
@@ -81,10 +83,9 @@ async def upload_pr_video(repo: str, pr_number: int, file_path: str, token: str)
             upload_url,
             data=data,
             headers={
-                "Authorization": f"Bearer {token}",
+                "Authorization": f"token {token}",
                 "Accept": "application/vnd.github+json",
                 "Content-Type": content_type,
-                "X-GitHub-Api-Version": "2022-11-28",
             },
             method="POST",
         )
