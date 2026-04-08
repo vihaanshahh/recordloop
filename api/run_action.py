@@ -89,7 +89,10 @@ async def main() -> int:
     repo = _env("REPO")
     pr_number_str = _env("PR_NUMBER")
     github_token = _env("GITHUB_TOKEN")
-    preview_url = _env("PREVIEW_URL")
+    # Prefer the explicitly-passed preview-url. If empty, the auto-start step
+    # in action.yml may have spun up the user's app inside the runner and
+    # exported the localhost URL via $GITHUB_ENV.
+    preview_url = _env("PREVIEW_URL") or _env("RECORDLOOP_DETECTED_URL")
     provider = _env("PROVIDER", "openai").lower()
     model = _env("MODEL") or None
 

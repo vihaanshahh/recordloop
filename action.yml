@@ -42,6 +42,22 @@ inputs:
     description: 'Python version to install on the runner.'
     required: false
     default: '3.12'
+  auto-start:
+    description: 'When preview-url is empty AND the repo has a package.json, automatically build and start the user app inside the runner so flows can be recorded against localhost. Set to "false" to disable.'
+    required: false
+    default: 'true'
+  start-command:
+    description: 'Override the auto-start command. Default tries: npm ci → npm run build (if present) → npm start (or npm run dev as fallback).'
+    required: false
+    default: ''
+  start-port:
+    description: 'Port to probe for the auto-started app. Default tries 3000, then 3001, 4173 (vite preview), 5173 (vite dev), 4321 (astro), 8080.'
+    required: false
+    default: ''
+  node-version:
+    description: 'Node version to install when auto-start is enabled.'
+    required: false
+    default: '20'
 
 outputs:
   flows_count:
@@ -64,6 +80,105 @@ runs:
         # action's own checkout (${{ github.action_path }}) — no pip install
         # of RecordLoop itself.
         python -m pip install --quiet 'openai>=1.50.0'
+
+    - name: Install Playwright (only when we're going to record)
+      if: inputs.preview-url != '' || inputs.auto-start != 'false'
+      shell: bash
+      run: |
+        python -m pip install --quiet 'playwright>=1.44.0'
+        python -m playwright install --with-deps chromium
+
+    - name: Checkout user repo (for auto-start)
+      if: inputs.preview-url == '' && inputs.auto-start != 'false'
+      uses: actions/checkout@v4
+      with:
+        path: __recordloop_target__
+        fetch-depth: 0
+
+    - name: Set up Node (for auto-start)
+      if: inputs.preview-url == '' && inputs.auto-start != 'false'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Build and start user app in background
+      if: inputs.preview-url == '' && inputs.auto-start != 'false'
+      shell: bash
+      env:
+        START_COMMAND: ${{ inputs.start-command }}
+        START_PORT: ${{ inputs.start-port }}
+      run: |
+        set -e
+        cd __recordloop_target__
+
+        if [ ! -f package.json ]; then
+          echo "auto-start: no package.json found — skipping (will fall back to planned-flows mode)"
+          exit 0
+        fi
+
+        echo "::group::Install dependencies"
+        if [ -f package-lock.json ]; then
+          npm ci --no-audit --no-fund --loglevel=error
+        else
+          npm install --no-audit --no-fund --loglevel=error
+        fi
+        echo "::endgroup::"
+
+        if grep -q '"build"\s*:' package.json; then
+          echo "::group::Build"
+          npm run build --silent || { echo "build failed; trying to start without it"; }
+          echo "::endgroup::"
+        fi
+
+        echo "::group::Start app in background"
+        if [ -n "$START_COMMAND" ]; then
+          echo "using START_COMMAND override: $START_COMMAND"
+          nohup bash -c "$START_COMMAND" > /tmp/recordloop-app.log 2>&1 &
+        elif grep -q '"start"\s*:' package.json; then
+          echo "running: npm start"
+          nohup npm start > /tmp/recordloop-app.log 2>&1 &
+        elif grep -q '"dev"\s*:' package.json; then
+          echo "running: npm run dev"
+          nohup npm run dev > /tmp/recordloop-app.log 2>&1 &
+        else
+          echo "auto-start: no start or dev script found in package.json — skipping"
+          exit 0
+        fi
+        APP_PID=$!
+        echo "started PID=$APP_PID"
+        echo "::endgroup::"
+
+        # Probe for a live HTTP server. We try the common ports for Node web frameworks.
+        if [ -n "$START_PORT" ]; then
+          PORTS="$START_PORT"
+        else
+          PORTS="3000 3001 4173 5173 4321 8080"
+        fi
+
+        echo "::group::Wait for app to come up"
+        DETECTED=""
+        for attempt in $(seq 1 60); do
+          for port in $PORTS; do
+            if curl -sf -o /dev/null "http://localhost:$port/"; then
+              DETECTED="http://localhost:$port"
+              echo "✓ app responded on $DETECTED (after ${attempt}s)"
+              break 2
+            fi
+          done
+          sleep 1
+        done
+
+        if [ -z "$DETECTED" ]; then
+          echo "✗ app did not come up within 60s on any of: $PORTS"
+          echo "--- last 40 lines of /tmp/recordloop-app.log ---"
+          tail -40 /tmp/recordloop-app.log || true
+          echo "--- end log ---"
+          # Don't fail the whole job — fall through to planned-flows mode
+          exit 0
+        fi
+        echo "::endgroup::"
+
+        echo "RECORDLOOP_DETECTED_URL=$DETECTED" >> "$GITHUB_ENV"
 
     - name: Run RecordLoop analyzer
       id: runner
