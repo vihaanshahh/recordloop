@@ -77,20 +77,8 @@ def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
             lines.append(f.change_context)
         lines.append("")
 
-        after_gif  = rec.get("gif_url") or ""
-        before_gif = rec.get("before_gif_url") or ""
-
-        if before_gif and after_gif:
-            lines.append(
-                "<table><tr>"
-                "<th>Before</th>"
-                "<th>After</th>"
-                "</tr><tr>"
-                f'<td><img src="{before_gif}" width="320" alt="before"/></td>'
-                f'<td><img src="{after_gif}"  width="320" alt="after"/></td>'
-                "</tr></table>"
-            )
-        elif after_gif:
+        after_gif = rec.get("gif_url") or ""
+        if after_gif:
             lines.append(f"![{_flow_title(f.name)}]({after_gif})")
         elif rec.get("video_url"):
             lines.append(f"[▶ Watch recording]({rec['video_url']})")
@@ -193,27 +181,25 @@ async def main() -> int:
     print(f"  analyzer produced {len(flows)} flow(s)")
     _emit_output("flows_count", str(len(flows)))
 
-    # 3. Optionally record with Playwright (after = PR branch, before = base branch)
+    # 3. Record one clean flow with Playwright
     recordings: list | None = None
     if flows and preview_url:
         try:
             from api.cloud_recorder import record_flows  # lazy: pulls in playwright
-            recordings = await asyncio.to_thread(record_flows, flows, preview_url, base_url)
+            recordings = await asyncio.to_thread(record_flows, flows, preview_url)
             ok = sum(1 for r in recordings if r.get("status") == "done")
             print(f"  recorded {ok}/{len(recordings)} flow(s) with Playwright")
         except Exception as e:
             print(f"RecordLoop: recording skipped — {e}", file=sys.stderr)
 
-    # 3b. Upload all GIFs (after + before) to GitHub releases for inline display
+    # 3b. Upload the GIF (and MP4 fallback link) to GitHub releases for inline display
     if recordings:
         upload_tasks: list = []
         upload_meta: list = []  # (rec_dict, url_key_to_set)
         for r in recordings:
             for path_key, url_key in [
-                ("gif",         "gif_url"),
-                ("video",       "video_url"),
-                ("before_gif",  "before_gif_url"),
-                ("before_video","before_video_url"),
+                ("gif",   "gif_url"),
+                ("video", "video_url"),
             ]:
                 path = r.get(path_key)
                 if path:
@@ -225,8 +211,7 @@ async def main() -> int:
             for (rec, url_key), url in zip(upload_meta, upload_results):
                 if isinstance(url, str):
                     rec[url_key] = url
-                    label = "before GIF" if "before" in url_key else "after GIF"
-                    print(f"  uploaded {label} for '{rec['name']}' → {url}")
+                    print(f"  uploaded {url_key} for '{rec['name']}' → {url}")
                 else:
                     print(f"  upload failed for '{rec['name']}' ({url_key}): {url}", file=sys.stderr)
 

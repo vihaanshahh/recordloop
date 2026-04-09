@@ -103,10 +103,10 @@ _SYSTEM = (
     "lines were added (+) or removed (-) and what HTML/JSX they produce.\n"
     "  2. Call read_file only when the diff alone is insufficient to understand "
     "the surrounding structure (e.g. to find the selector for a new element).\n"
-    "  3. Submit 1–3 tightly-scoped flows — one per distinct changed behavior. "
-    "Fewer, more targeted flows beat many generic ones. For each flow, "
-    "change_context must be ONE sentence (max 20 words) naming the specific "
-    "diff change and what the flow confirms about it.\n\n"
+    "  3. Submit EXACTLY ONE flow — the single most important behavior changed "
+    "by this PR. Pick the most user-visible / load-bearing change and ignore "
+    "the rest. change_context must be ONE sentence (max 20 words) naming the "
+    "specific diff change and what the flow confirms about it.\n\n"
     "Selector priority: data-testid > id (#foo) > name attr > aria-label > "
     "visible text. Only include steps that will succeed on the real page. "
     "Use realistic test data (real-looking emails, plausible names, etc.).\n\n"
@@ -397,7 +397,8 @@ def _parse_flows(payload: dict) -> list[InteractionFlow]:
                 steps=steps,
             )
         )
-    return flows
+    # Hard cap: we only want one clean recording per PR.
+    return flows[:1]
 
 
 # ---------------------------------------------------------------------------
@@ -491,8 +492,8 @@ def analyze_pr(
         f"Pull request opened against preview URL: {preview_url or '(none)'}\n\n"
         f"{overview}\n\n"
         "Start by calling read_diff on the UI files above. Find exactly what "
-        "lines were added or changed. Then generate 1–3 flows that test those "
-        "specific changes. Call submit_flows when done."
+        "lines were added or changed. Then generate EXACTLY ONE flow that "
+        "tests the single most important change. Call submit_flows when done."
     )
 
     messages: list[dict] = [

@@ -19,34 +19,29 @@ VIDEO_DIR = "/tmp/recordloop-videos"
 def record_flows(
     flows: list[InteractionFlow],
     preview_url: str,
-    base_url: str = "",
+    base_url: str = "",  # accepted for backwards compat but no longer used
 ) -> list[dict]:
-    """Record each interaction flow against the preview (after) URL and optionally
-    the base (before) URL. Returns one result dict per flow; when base_url is
-    provided each dict also carries before_video / before_gif keys.
+    """Record each interaction flow against the preview URL.
+
+    One clean recording per flow. base_url is intentionally ignored — we used
+    to also record the base branch for a before/after table, but it doubled
+    runtime for marginal value and the agent now generates a single targeted
+    flow per PR anyway.
     """
-    results = []
-    for flow in flows:
-        rec = _record_one(flow, preview_url, label="after")
-        if base_url:
-            before = _record_one(flow, base_url, label="before")
-            rec["before_video"]  = before.get("video")
-            rec["before_gif"]    = before.get("gif")
-            rec["before_status"] = before.get("status")
-            rec["before_error"]  = before.get("error")
-        results.append(rec)
-    return results
+    return [_record_one(flow, preview_url, label="after") for flow in flows]
 
 
 def _record_one(flow: InteractionFlow, preview_url: str, label: str = "after") -> dict:
     # Lazy import — only pulled in when an actual recording is requested.
     from recordloop.capture.recorder import PlaywrightRecorder, RecorderConfig
 
+    # No slow_mo: Playwright's natural action timing reads as smooth in
+    # the recording. slow_mo=200 inserted hitches between every operation
+    # which made the GIF look choppy.
     config = RecorderConfig(
         base_url=preview_url,
         video_dir=VIDEO_DIR,
         headless=True,
-        slow_mo=200,
     )
 
     result = {
@@ -66,17 +61,23 @@ def _record_one(flow: InteractionFlow, preview_url: str, label: str = "after") -
                 start = preview_url.rstrip("/") + "/" + start.lstrip("/")
 
             page = recorder.start_recording(start)
-            page.wait_for_load_state("domcontentloaded")
-            time.sleep(0.8)
+            page.wait_for_load_state("networkidle", timeout=10000)
+            # Brief settle so the first frame isn't mid-paint.
+            time.sleep(0.4)
 
             recorded = 0
             for step in flow.steps:
                 try:
                     _execute(page, recorder, step)
                     recorded += 1
-                    time.sleep(0.8)
+                    # Short, even pacing between steps so motion stays
+                    # smooth in the GIF without feeling rushed.
+                    time.sleep(0.35)
                 except Exception as e:
                     print(f"[cloud-recorder] step skipped ({step.action} {step.selector}): {e}")
+
+            # Hold the final frame for a beat so viewers see the end state.
+            time.sleep(0.6)
 
             recorder.stop_recording()
 
@@ -157,23 +158,26 @@ def _make_preview_gif(mp4_path: Path, label: str = "after") -> Optional[Path]:
     """
     gif_path = mp4_path.with_name(f"{mp4_path.stem}-{label}.gif")
     try:
+        # 15 fps + full 256-colour palette + sierra2_4a dither = noticeably
+        # smoother motion than 8 fps / bayer. Cap at 15s to keep file size
+        # reasonable when paired with the higher frame rate.
         result = subprocess.run(
             [
                 "ffmpeg", "-y",
-                "-t", "20",
+                "-t", "15",
                 "-i", str(mp4_path),
                 "-vf", (
-                    "fps=8,"
-                    "scale=640:-1:flags=lanczos,"
+                    "fps=15,"
+                    "scale=720:-1:flags=lanczos,"
                     "split[s0][s1];"
-                    "[s0]palettegen=max_colors=128[p];"
-                    "[s1][p]paletteuse=dither=bayer"
+                    "[s0]palettegen=stats_mode=diff[p];"
+                    "[s1][p]paletteuse=dither=sierra2_4a:diff_mode=rectangle"
                 ),
                 "-loop", "0",
                 str(gif_path),
             ],
             capture_output=True,
-            timeout=120,
+            timeout=180,
         )
         if result.returncode == 0 and gif_path.exists() and gif_path.stat().st_size > 0:
             size_kb = gif_path.stat().st_size // 1024

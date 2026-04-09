@@ -103,23 +103,6 @@ runs:
         path: __recordloop_target__
         fetch-depth: 0
 
-    - name: Checkout BASE branch into worktree (for before/after recording)
-      if: inputs.preview-url == '' && inputs.auto-start != 'false'
-      shell: bash
-      run: |
-        BASE_REF="${{ github.event.pull_request.base.ref }}"
-        BASE_SHA="${{ github.event.pull_request.base.sha }}"
-        if [ -z "$BASE_REF" ]; then
-          echo "No base ref — skipping before/after worktree"
-          exit 0
-        fi
-        cd __recordloop_target__
-        git fetch origin "$BASE_REF" --depth=1 2>/dev/null || true
-        # Add a sibling worktree at the base branch commit
-        git worktree add ../recordloop_base "$BASE_SHA" 2>/dev/null \
-          || git worktree add ../recordloop_base "origin/$BASE_REF" 2>/dev/null \
-          || echo "worktree add failed — before recording will be skipped"
-
     - name: Set up Node (for auto-start)
       if: inputs.preview-url == '' && inputs.auto-start != 'false'
       uses: actions/setup-node@v4
@@ -205,68 +188,6 @@ runs:
 
         echo "RECORDLOOP_DETECTED_URL=$DETECTED" >> "$GITHUB_ENV"
 
-    - name: Build and start BASE branch app (for before/after recording)
-      if: inputs.preview-url == '' && inputs.auto-start != 'false'
-      shell: bash
-      env:
-        START_COMMAND: ${{ inputs.start-command }}
-        START_PORT: ${{ inputs.start-port }}
-      run: |
-        if [ -z "$RECORDLOOP_DETECTED_URL" ]; then
-          echo "PR app did not start — skipping base branch build"
-          exit 0
-        fi
-        if [ ! -d recordloop_base ] || [ ! -f recordloop_base/package.json ]; then
-          echo "No base worktree or package.json — skipping before recording"
-          exit 0
-        fi
-
-        cd recordloop_base
-
-        echo "::group::Install dependencies (base branch)"
-        if [ -f package-lock.json ]; then
-          npm ci --no-audit --no-fund --loglevel=error
-        else
-          npm install --no-audit --no-fund --loglevel=error
-        fi
-        echo "::endgroup::"
-
-        if grep -q '"build"\s*:' package.json; then
-          echo "::group::Build (base branch)"
-          npm run build --silent || { echo "base build failed — skipping before recording"; exit 0; }
-          echo "::endgroup::"
-        fi
-
-        # Use port 3100 for the base branch to avoid collision with the PR app
-        BASE_PORT=3100
-        echo "::group::Start base branch app on port $BASE_PORT"
-        if [ -n "$START_COMMAND" ]; then
-          PORT=$BASE_PORT nohup bash -c "$START_COMMAND" > /tmp/recordloop-base.log 2>&1 &
-        elif grep -q '"start"\s*:' package.json; then
-          PORT=$BASE_PORT nohup npm start > /tmp/recordloop-base.log 2>&1 &
-        elif grep -q '"dev"\s*:' package.json; then
-          PORT=$BASE_PORT nohup npm run dev > /tmp/recordloop-base.log 2>&1 &
-        else
-          echo "No start/dev script in base branch — skipping before recording"
-          exit 0
-        fi
-        echo "::endgroup::"
-
-        echo "::group::Wait for base branch app"
-        for attempt in $(seq 1 60); do
-          if curl -sf -o /dev/null "http://localhost:$BASE_PORT/"; then
-            echo "✓ base app on http://localhost:$BASE_PORT (after ${attempt}s)"
-            echo "RECORDLOOP_BASE_URL=http://localhost:$BASE_PORT" >> "$GITHUB_ENV"
-            break
-          fi
-          sleep 1
-        done
-        if [ -z "$RECORDLOOP_BASE_URL" ]; then
-          echo "✗ base app did not come up — before recording skipped"
-          tail -30 /tmp/recordloop-base.log || true
-        fi
-        echo "::endgroup::"
-
     - name: Run RecordLoop analyzer
       id: runner
       shell: bash
@@ -281,7 +202,6 @@ runs:
         PROVIDER: ${{ inputs.provider }}
         MODEL: ${{ inputs.model }}
         PREVIEW_URL: ${{ inputs.preview-url }}
-        BASE_URL: ${{ env.RECORDLOOP_BASE_URL }}
         ACTION_PATH: ${{ github.action_path }}
         # Threaded into the PR comment so users can click straight to the
         # workflow run page where the video artifact is downloadable.
