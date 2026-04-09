@@ -98,12 +98,37 @@ def _record_one(flow: InteractionFlow, preview_url: str, label: str = "after") -
     return result
 
 
+def _normalize_selector(sel: str) -> str:
+    """Normalize selectors the LLM emits into shapes Playwright understands.
+
+    The model frequently writes a bare visible-text string as a selector
+    (e.g. ``Click me``) when it means ``text=Click me``. Playwright treats
+    bare strings as CSS, so the click silently times out. Detect that case
+    and add the ``text=`` prefix. Recognised CSS / Playwright engine shapes
+    pass through unchanged.
+    """
+    s = (sel or "").strip()
+    if not s:
+        return s
+    # Already a Playwright engine selector or a CSS expression we know.
+    if s.startswith((
+        "text=", "css=", "xpath=", "id=", "data-testid=", "role=",
+        "//", "#", ".", "[", ":", "*",
+    )):
+        return s
+    # CSS-like tokens (tag, tag.class, tag#id) — no spaces, only CSS chars.
+    if " " not in s and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.#-]*", s):
+        return s
+    # Anything else with spaces / punctuation is almost certainly visible text.
+    return f"text={s}"
+
+
 def _execute(page, recorder, step: InteractionStep):
     """Execute one step on the page and record it."""
     from recordloop.core.session import ActionType  # lazy
 
     action = step.action.lower()
-    sel = step.selector
+    sel = _normalize_selector(step.selector)
     val = step.value
 
     match action:

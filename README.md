@@ -1,291 +1,165 @@
 # RecordLoop
 
-Drop a JS SDK into your frontend. It captures every interaction from inside the browser. Commit the session JSON, and a GitHub Action replays it with Playwright, records video, uploads to S3, and posts the link on your PR.
+**AI-driven UI test recordings on every PR.** A GitHub Action reads your pull request diff, an LLM agent generates realistic Playwright interaction flows targeted at exactly what changed, replays them against your preview URL, and posts the recording back as a PR comment.
 
-**Works with React, Vue, Next.js, Angular, Svelte, or any web app.**
-
-## How it works
+No JS SDK. No bridge server. No S3 bucket. No committed session files. Twelve lines of YAML and one secret.
 
 ```
- Local dev                              CI/CD (GitHub Action)
-
- Your App + JS SDK                      PR opened
-      │ captures clicks,                     │
-      │ typing, navigation                   ▼
-      ▼                                Finds .recordloop/sessions/*.json
- .recordloop/sessions/abc.json              │
-      │ committed to repo (~3KB)            ▼
-      │                                Runner: replays with Playwright
-      │                                     │ records video
-      │                                     ▼
-      │                                S3: uploads video (pre-signed URL)
-      │                                     │
-      │                                     ▼
-      │                                InstantDB: saves metadata (optional)
-      │                                     │
-      │                                     ▼
-      └──────────────────────────> PR comment: "Watch recording" link
-
- Cost at 1000 recordings/month: ~$0.58
- (S3 storage + egress. GitHub Actions + InstantDB = free tier.)
+PR opened ──► Agent reads diff ──► Playwright replays ──► PR comment with GIF
 ```
+
+- **12-line install** — one workflow file, one secret. `uses: vihaanshahh/recordloop@v1` and you're done.
+- **AI reads your diff** — an agent loop calls `read_diff` / `read_file` / `list_files` and generates one focused flow per PR aimed at the actual changed lines.
+- **30+ frameworks** — React, Vue, Next.js, Nuxt, Angular, Svelte, Astro, Solid, Qwik, SvelteKit, Remix, Blazor, Razor, Rails (ERB), Phoenix LiveView, Django/Jinja, Twig, Handlebars, Liquid, Pug, Nunjucks, PHP, plain HTML, HTMX. Anything that ships markup.
+- **Bounded cost** — $0.001 to $0.005 per PR on `gpt-5.4`. The agent is hard-capped at 10 iterations, 30 files, and 50K input tokens, so worst-case is around $0.10 per PR even on expensive reasoning models.
+- **MIT licensed, zero infra** — every line is auditable. No telemetry. Recordings are stored as release assets in your own repo.
 
 ## Quick start
 
-### 1. Install
+### 1. Add the workflow
 
-```bash
-pip install playwright pytest watchdog
-playwright install chromium
-
-python -m recordloop init    # detects framework, writes .env, creates .recordloop/
-```
-
-### 2. Add the JS SDK to your frontend
-
-**React:**
-
-```jsx
-import { RecordLoopProvider, useRecordLoop } from 'recordloop/react'
-
-function App() {
-  return (
-    <RecordLoopProvider endpoint="http://localhost:8787">
-      <YourApp />
-      <RecordButton />
-    </RecordLoopProvider>
-  )
-}
-
-function RecordButton() {
-  const { recording, actions, start, stop } = useRecordLoop()
-  return (
-    <button onClick={recording ? stop : start}>
-      {recording ? `Stop (${actions.length} actions)` : 'Record'}
-    </button>
-  )
-}
-```
-
-**Vue:**
-
-```js
-import { RecordLoopPlugin } from 'recordloop/vue'
-app.use(RecordLoopPlugin, { endpoint: 'http://localhost:8787' })
-```
-
-```vue
-<script setup>
-import { useRecordLoop } from 'recordloop/vue'
-const { recording, actions, start, stop } = useRecordLoop()
-</script>
-<template>
-  <button @click="recording ? stop() : start()">
-    {{ recording ? `Stop (${actions.length})` : 'Record' }}
-  </button>
-</template>
-```
-
-**Vanilla JS / Angular / Svelte / anything:**
-
-```html
-<script src="recordloop/dist/recordloop.js"></script>
-<script>
-  const rl = new RecordLoop({ endpoint: 'http://localhost:8787' })
-  rl.start()
-  // user interacts...
-  rl.stop()  // POSTs session to bridge, saves to .recordloop/sessions/
-</script>
-```
-
-### 3. Start the bridge server (local dev)
-
-```bash
-python -m recordloop serve
-```
-
-The bridge receives sessions from the JS SDK and:
-- Saves to `.recordloop/sessions/` (commit these for CI/CD)
-- Generates Playwright test code
-- Converts browser events to replayable actions
-
-### 4. Commit sessions, get videos on PR
-
-```bash
-git add .recordloop/sessions/
-git commit -m "Add recording sessions"
-git push
-```
-
-The GitHub Action picks up the sessions, replays with Playwright, and posts video links on the PR. See [CI/CD setup](#cicd--github-action) below.
-
-### 5. (Optional) Run locally
-
-```bash
-python -m recordloop run           # replay all sessions
-python -m recordloop run abc123    # replay specific session
-python -m recordloop report        # HTML report with timelines + video
-```
-
-## CI/CD — GitHub Action
-
-### Setup
-
-1. Create an S3 bucket:
-```bash
-# Set your env vars first (see .env.example)
-python -m recordloop setup-s3
-```
-
-2. Add secrets to your GitHub repo:
-   - `RECORDLOOP_S3_BUCKET`
-   - `AWS_ACCESS_KEY_ID`
-   - `AWS_SECRET_ACCESS_KEY`
-
-3. Add the workflow (`.github/workflows/recordloop.yml`):
+Drop this into `.github/workflows/recordloop.yml`:
 
 ```yaml
 name: RecordLoop
 on:
   pull_request:
-    paths: ['.recordloop/sessions/**']
-
+    types: [opened, synchronize, reopened]
+permissions:
+  pull-requests: write
+  contents: write
 jobs:
-  replay:
+  recordloop:
     runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: vihaanshahh/recordloop@v1
         with:
-          python-version: '3.12'
-      - uses: vihaanshahh/recordloop@main
-        with:
-          s3-bucket: ${{ secrets.RECORDLOOP_S3_BUCKET }}
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-The action will:
-- Find all session JSONs in `.recordloop/sessions/`
-- Replay each with Playwright, record video
-- Upload video to S3 (pre-signed URL, auto-expires in 30 days)
-- Post a PR comment with "Watch recording" links
+That's the entire install — no `pip`, no `npm`, no bridge server. The action installs its own Python, Playwright, and ffmpeg dependencies on the runner.
 
-### Optional: InstantDB dashboard
+The `if:` guard disables the job on PRs from forks so untrusted contributors can't access your OpenAI key.
 
-Add these secrets for real-time dashboard sync:
-- `RECORDLOOP_INSTANTDB_APP_ID`
-- `RECORDLOOP_INSTANTDB_ADMIN_TOKEN`
-
-## JS SDK API
-
-```js
-const rl = new RecordLoop({
-  endpoint: 'http://localhost:8787',  // bridge server (local dev)
-  instantdb: { appId: '...' },       // optional: real-time dashboard sync
-  clicks: true,
-  input: true,
-  navigation: true,     // captures SPA pushState/replaceState
-  scroll: true,
-  ignore: ['[data-recordloop-ignore]'],
-  debounceMs: 150,
-  meta: {},              // custom metadata attached to session
-})
-
-rl.start()               // begin recording
-const session = rl.stop() // stop, POST to bridge, return session
-rl.getSession()          // get session without stopping
-rl.download()            // download session as JSON file
-rl.length                // action count
-```
-
-**Selector strategy** (stable selectors for Playwright replay):
-1. `data-testid` / `data-test-id` (best)
-2. `id`
-3. `name` (forms)
-4. `aria-label`
-5. `:has-text()` (buttons/links)
-6. CSS nth-child path (fallback)
-
-### React
-
-```jsx
-import { RecordLoopProvider, useRecordLoop } from 'recordloop/react'
-// or standalone:
-import { useRecorder } from 'recordloop/react'
-const { recording, actions, start, stop } = useRecorder({ endpoint: '...' })
-```
-
-### Vue
-
-```js
-import { RecordLoopPlugin, useRecordLoop } from 'recordloop/vue'
-// or standalone:
-import { useRecorder } from 'recordloop/vue'
-const { recording, actions, start, stop } = useRecorder({ endpoint: '...' })
-```
-
-## CLI
+### 2. Add your OpenAI key as a secret
 
 ```bash
-python -m recordloop init              # detect framework, generate .env, create .recordloop/
-python -m recordloop serve             # start bridge server (receives JS SDK)
-python -m recordloop run [session_id]  # replay sessions → video + test code
-python -m recordloop run --output json # JSON output (for CI)
-python -m recordloop report            # generate HTML report
-python -m recordloop setup-s3          # create + configure S3 bucket
-python -m recordloop config            # show resolved config
+gh secret set OPENAI_API_KEY
 ```
 
-## Environment variables
+Or via Settings → Secrets and variables → Actions. Azure OpenAI works too — see [provider configuration](#provider-configuration) below.
 
-```bash
-# Framework (auto-detected from package.json)
-RECORDLOOP_FRAMEWORK=react
-RECORDLOOP_BASE_URL=http://localhost:3000
-RECORDLOOP_PORT=3000
+### 3. Open a PR — get a video comment
 
-# Recording
-RECORDLOOP_VIDEO_DIR=test-videos
-RECORDLOOP_TEST_OUTPUT_DIR=generated-tests
-RECORDLOOP_HEADLESS=true
-RECORDLOOP_SLOW_MO=0
-RECORDLOOP_VIEWPORT_WIDTH=1280
-RECORDLOOP_VIEWPORT_HEIGHT=720
+On every PR, the action will:
 
-# Cloud — S3 (optional, enables CI uploads)
-RECORDLOOP_S3_BUCKET=my-recordloop-videos
-RECORDLOOP_S3_REGION=us-east-1
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
+1. Fetch the diff via the GitHub API
+2. Hand the diff to an agent loop with `read_diff` / `read_file` / `list_files` / `submit_flows` tools
+3. Generate one short Playwright flow targeted at the changed lines
+4. Auto-start your app on the runner (or use a `preview-url` you provide)
+5. Replay the flow with Playwright, record it as MP4 + GIF
+6. Upload the GIF to a `recordloop-recordings` release in your repo
+7. Post a PR comment with the GIF rendered inline
 
-# Cloud — InstantDB (optional, enables dashboard)
-RECORDLOOP_INSTANTDB_APP_ID=...
-RECORDLOOP_INSTANTDB_ADMIN_TOKEN=...
-```
+## Inputs
 
-## Architecture — why it's cheap
-
-| Component | What it does | Cost |
+| Input | Default | Description |
 |---|---|---|
-| **S3** | Store videos | ~$0.12/mo (5GB) |
-| **S3 pre-signed URLs** | Serve videos (no CDN/server) | ~$0.45/mo egress |
-| **InstantDB** | Session metadata + dashboard | Free tier |
-| **GitHub Actions** | The runner (replay + upload) | Free tier |
-| **Sessions in repo** | Storage + version control | Free (just git) |
+| `openai-api-key` | _(required)_ | OpenAI API key. Used by the analyzer agent. |
+| `preview-url` | _(empty)_ | PR preview deployment URL. If empty AND `auto-start` is on, the action builds and runs your app on the runner. |
+| `auto-start` | `true` | When `preview-url` is empty AND there's a `package.json`, auto-build and start your app on the runner so flows can record against `localhost`. |
+| `start-command` | _(auto-detect)_ | Override the auto-start command. Default tries `npm ci` → `npm run build` → `npm start` (or `npm run dev`). |
+| `start-port` | _(auto-probe)_ | Port to probe for the app. Default tries `3000, 3001, 4173, 5173, 4321, 8080`. |
+| `node-version` | `20` | Node version to install when auto-start is enabled. |
+| `python-version` | `3.12` | Python version to install for the runner. |
+| `model` | `gpt-5.4` | Override the analyzer model. Try `gpt-4o-mini` for the cheapest setup. |
+| `provider` | `openai` | `openai` (default) or `azure`. |
+| `azure-openai-api-key` | _(empty)_ | Azure OpenAI API key. Required when `provider: azure`. |
+| `azure-openai-endpoint` | _(empty)_ | Azure OpenAI resource endpoint. |
+| `azure-openai-deployment` | _(empty)_ | Azure OpenAI deployment name (used as the model identifier). |
+| `github-token` | `${{ github.token }}` | Token used to fetch the PR diff and post the comment. |
 
-No API server. No database server. No CDN. Videos served directly from S3 via pre-signed URLs that auto-expire.
+## Provider configuration
 
-## Python API (direct Playwright, no JS SDK)
+### OpenAI (default)
 
-```python
-from recordloop import PlaywrightRecorder, RecordLoopConfig
-
-config = RecordLoopConfig()
-with PlaywrightRecorder(config.to_recorder_config()) as recorder:
-    page = recorder.start_recording(config.base_url)
-    page.fill("#search", "query")
-    page.click("#submit")
-    recorder.stop_recording()
-    print(recorder.generate_test_code())
+```yaml
+- uses: vihaanshahh/recordloop@v1
+  with:
+    openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+    model: gpt-4o-mini  # optional cheaper override
 ```
+
+### Azure OpenAI
+
+For compliance-friendly routing where the diff never leaves your Azure tenant:
+
+```yaml
+- uses: vihaanshahh/recordloop@v1
+  with:
+    provider: azure
+    azure-openai-api-key: ${{ secrets.AZURE_OPENAI_API_KEY }}
+    azure-openai-endpoint: https://my-resource.openai.azure.com
+    azure-openai-deployment: gpt-5.4
+```
+
+## How it works
+
+```
+┌─────────────────┐    ┌────────────────────┐    ┌────────────────────┐    ┌──────────────┐
+│   PR opened     │ ─► │  Agent reads diff  │ ─► │  Playwright replay │ ─► │  PR comment  │
+│                 │    │  (read_diff /      │    │  on auto-started   │    │  inline GIF  │
+│  pull_request   │    │   read_file /      │    │  app or preview    │    │              │
+│  workflow event │    │   list_files)      │    │  URL               │    │              │
+└─────────────────┘    └────────────────────┘    └────────────────────┘    └──────────────┘
+```
+
+The agent sees a token-budgeted overview of every changed file in the PR and uses tools to drill into whichever ones look load-bearing. It generates exactly one short flow (2–5 steps) whose every step targets the changed region — no wandering through unchanged UI.
+
+A Playwright worker on the runner replays the flow, ffmpeg converts the MP4 to a 15 fps palette-optimised GIF, and the action uploads it to a `recordloop-recordings` pre-release in your repo. The GIF renders inline in the PR comment.
+
+## What the agent guarantees
+
+- **Only one flow per PR** — picks the single most user-visible change.
+- **Only what changed** — every step in the flow must touch an element on a `+` diff line or sit directly next to one. No generic smoke tests.
+- **Bounded cost** — hard caps on iterations (10), files read (30), and total input tokens (50K).
+- **Bounded surface** — the agent only sees files changed in this PR, never the rest of your repo.
+
+## Privacy and security
+
+- Only the files changed in the PR are sent to the LLM provider, capped at ~50K tokens of input context. Nothing else in your repo is read.
+- The `if:` guard on the workflow disables the job entirely on PRs from forks, so untrusted contributors can't trigger runs against your OpenAI key.
+- Generated Playwright flows run inside the GitHub runner against your preview URL — same-origin only, no shell access, no arbitrary network egress.
+- Every line of the analyzer, the action, and the agent prompt is MIT licensed. Fork it, audit it, self-host it on your own runners.
+
+## Self-hosted runners
+
+RecordLoop is a composite GitHub Action — point it at a self-hosted runner via `runs-on: [self-hosted, linux]` and the action installs its own Playwright + ffmpeg dependencies on first run, then re-uses the cached layer on subsequent jobs. Your OpenAI key stays in your own secret store, network egress is whatever the runner allows, and recordings stay inside your GitHub org.
+
+## Cost
+
+| Setup | Per PR | Notes |
+|---|---|---|
+| `gpt-5.4` (default) | $0.001 – $0.005 | Most PRs land in this range. |
+| `gpt-4o-mini` | ~$0.0003 | Override `model` for the cheapest config. |
+| Worst case | ~$0.10 | Caps: 10 iterations × 50K input tokens. |
+
+There are no seats, no quotas, no minimums. You pay your own LLM bill, RecordLoop marks nothing up.
+
+## Local development
+
+To work on RecordLoop itself:
+
+```bash
+git clone https://github.com/vihaanshahh/recordloop
+cd recordloop
+pip install -e '.[dev]'
+pytest
+```
+
+The analyzer lives in `api/analyzer.py`, the recorder in `api/cloud_recorder.py`, and the action entry point in `api/run_action.py`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

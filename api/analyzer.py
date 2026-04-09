@@ -117,7 +117,10 @@ _SYSTEM = (
     "region. change_context must be ONE sentence (max 20 words) naming the "
     "specific diff change and what the flow confirms about it.\n\n"
     "Selector priority: data-testid > id (#foo) > name attr > aria-label > "
-    "visible text. Only include steps that will succeed on the real page.\n\n"
+    "visible text. For visible text use Playwright text-engine syntax: "
+    "`text=Exact visible label`. For CSS use `[data-testid='foo']` or `#id`. "
+    "Never emit a bare string like `Click me` — it will be parsed as CSS and "
+    "silently fail. Only include steps that will succeed on the real page.\n\n"
     "For navigate steps: selector must be a URL path (e.g. '/' or '/pricing'), "
     "NOT a CSS selector like 'body'. Use wait or hover for element interactions."
 )
