@@ -128,17 +128,22 @@ def _execute(page, recorder, step: InteractionStep):
     from recordloop.core.session import ActionType  # lazy
 
     action = step.action.lower()
-    sel = _normalize_selector(step.selector)
     val = step.value
 
+    # Navigate is special: its "selector" field carries a URL path, not a
+    # DOM selector, so we must NOT push it through _normalize_selector
+    # (which would mistake "/" for visible text and turn it into "text=/").
+    if action == "navigate":
+        url = val or step.selector
+        if not url.startswith(("http://", "https://", "/")):
+            raise ValueError(f"navigate step has non-URL target {url!r} — skipping")
+        page.goto(url, wait_until="domcontentloaded")
+        recorder.record_navigate(url)
+        return
+
+    sel = _normalize_selector(step.selector)
+
     match action:
-        case "navigate":
-            url = val or sel
-            # Guard against the LLM emitting a CSS selector instead of a URL.
-            if not url.startswith(("http://", "https://", "/")):
-                raise ValueError(f"navigate step has non-URL target {url!r} — skipping")
-            page.goto(url, wait_until="domcontentloaded")
-            recorder.record_navigate(url)
 
         case "click":
             page.click(sel, timeout=8000)
