@@ -66,9 +66,17 @@ def _record_one(flow: InteractionFlow, preview_url: str, label: str = "after") -
             time.sleep(0.4)
 
             recorded = 0
-            for step in flow.steps:
+            for i, step in enumerate(flow.steps):
+                # The agent almost always emits navigate as the first step
+                # even though we're already on that page from start_recording.
+                # Skip the redundant initial navigate so the recording doesn't
+                # double-load and so we don't fight Playwright's relative-URL
+                # handling.
+                if i == 0 and step.action.lower() == "navigate":
+                    recorded += 1
+                    continue
                 try:
-                    _execute(page, recorder, step)
+                    _execute(page, recorder, step, preview_url)
                     recorded += 1
                     # Short, even pacing between steps so motion stays
                     # smooth in the GIF without feeling rushed.
@@ -123,7 +131,7 @@ def _normalize_selector(sel: str) -> str:
     return f"text={s}"
 
 
-def _execute(page, recorder, step: InteractionStep):
+def _execute(page, recorder, step: InteractionStep, preview_url: str = ""):
     """Execute one step on the page and record it."""
     from recordloop.core.session import ActionType  # lazy
 
@@ -137,6 +145,10 @@ def _execute(page, recorder, step: InteractionStep):
         url = val or step.selector
         if not url.startswith(("http://", "https://", "/")):
             raise ValueError(f"navigate step has non-URL target {url!r} — skipping")
+        # Resolve relative paths against preview_url; Playwright's page.goto
+        # requires an absolute URL when no BrowserContext base_url is set.
+        if url.startswith("/") and preview_url:
+            url = preview_url.rstrip("/") + url
         page.goto(url, wait_until="domcontentloaded")
         recorder.record_navigate(url)
         return
