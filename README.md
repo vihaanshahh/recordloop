@@ -1,18 +1,39 @@
 # RecordLoop
 
-**AI-driven UI test recordings on every PR.** A GitHub Action reads your pull request diff, an LLM agent generates realistic Playwright interaction flows targeted at exactly what changed, replays them against your preview URL, and posts the recording back as a PR comment.
+**Stop pulling branches to verify "the button has the right hover state."** RecordLoop is a GitHub Action that reads every PR's diff, generates a Playwright flow targeted at exactly what changed, runs real assertions against the live page, and posts a pass/fail comment with an inline GIF of the interaction. The PR check turns red when an assertion fails.
 
-No JS SDK. No bridge server. No S3 bucket. No committed session files. Twelve lines of YAML and one secret.
+It's a UI test that writes itself, every PR, scoped to the diff.
 
 ```
-PR opened ──► Agent reads diff ──► Playwright replays ──► PR comment with GIF
+PR opened ──► Agent reads diff ──► Playwright runs flow + assertions ──► ✅ / ❌ PR comment
 ```
 
-- **12-line install** — one workflow file, one secret. `uses: vihaanshahh/recordloop@v1` and you're done.
-- **AI reads your diff** — an agent loop calls `read_diff` / `read_file` / `list_files` and generates one focused flow per PR aimed at the actual changed lines.
-- **30+ frameworks** — React, Vue, Next.js, Nuxt, Angular, Svelte, Astro, Solid, Qwik, SvelteKit, Remix, Blazor, Razor, Rails (ERB), Phoenix LiveView, Django/Jinja, Twig, Handlebars, Liquid, Pug, Nunjucks, PHP, plain HTML, HTMX. Anything that ships markup.
-- **Bounded cost** — $0.001 to $0.005 per PR on `gpt-5.4`. The agent is hard-capped at 10 iterations, 30 files, and 50K input tokens, so worst-case is around $0.10 per PR even on expensive reasoning models.
-- **MIT licensed, zero infra** — every line is auditable. No telemetry. Recordings are stored as release assets in your own repo.
+## Why
+
+You already know the pain. Someone opens a PR titled "fix: nav CTA href." You have to:
+
+1. Pull the branch
+2. `npm install`, `npm run dev`, wait
+3. Click around the nav, squint, decide it looks right
+4. Maybe forget to test the mobile breakpoint and ship a regression
+
+RecordLoop does steps 1-3 automatically on every PR, generates an assertion derived from the diff (`[data-testid='nav-cta']` should have `href` containing `github.com`), records the click as a GIF, and either marks the check green or red. You review the GIF in the PR comment instead of pulling the branch.
+
+- **Real assertions** — `assert_text`, `assert_attribute`, `assert_url`, `assert_visible`. The PR check fails when an assertion fails. Not a screensaver.
+- **Scoped to the diff** — every step in the flow must touch a `+` line or sit within ~5 lines of one. No wandering smoke tests.
+- **One clean comment per PR** — re-runs on push **edit the same comment in place**. Your PR thread doesn't fill up with bot noise.
+- **12-line install** — one workflow file, one secret. `uses: vihaanshahh/recordloop@v1`.
+- **MIT, zero infra** — no JS SDK, no bridge server, no S3 bucket. Recordings live as release assets in your own repo.
+- **Bounded cost** — $0.001-$0.005 per PR in LLM tokens (worst case ~$0.10). Runner minutes are typically 1-2 minutes per PR.
+
+## Prerequisites
+
+You need exactly two things before you can install:
+
+1. **An OpenAI account with a payment method on file.** Get one at [platform.openai.com](https://platform.openai.com). Add at least $5 of credit. RecordLoop bills against your own key — there's no RecordLoop SaaS, no markup, no proxy.
+2. **A GitHub repo where you can add a workflow file and a secret.** That's it.
+
+If you'd rather use Azure OpenAI (compliance-friendly, your code stays inside your Azure tenant), see [Azure setup](#azure-openai) below.
 
 ## Quick start
 
@@ -26,8 +47,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 permissions:
-  pull-requests: write
-  contents: write
+  pull-requests: write   # to post & edit the PR comment in place
+  contents: write        # to upload the GIF as a release asset on your repo
 jobs:
   recordloop:
     runs-on: ubuntu-latest
@@ -38,9 +59,13 @@ jobs:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-That's the entire install — no `pip`, no `npm`, no bridge server. The action installs its own Python, Playwright, and ffmpeg dependencies on the runner.
+That's the entire install. No `pip`, no `npm`, no bridge server.
 
-The `if:` guard disables the job on PRs from forks so untrusted contributors can't access your OpenAI key.
+**About the permissions:**
+- `pull-requests: write` — to post and edit the PR comment.
+- `contents: write` — to create a hidden pre-release named `recordloop-recordings` in your own repo and upload the recorded GIF as an asset there. Inline-rendering GIFs in markdown comments requires the file to live somewhere addressable; release assets are the cheapest GitHub-native answer. We never write to your code, branches, or tags.
+
+**About the `if:` guard:** by default this disables RecordLoop on PRs from forks, so untrusted contributors can't trigger runs against your OpenAI key. If you maintain an open-source project and need RecordLoop on contributor PRs, see [the OSS workflow](#oss-maintainers-fork-prs-with-a-label-gate) below — it uses the standard `pull_request_target` + label-gated pattern.
 
 ### 2. Add your OpenAI key as a secret
 
@@ -61,6 +86,47 @@ On every PR, the action will:
 5. Replay the flow with Playwright, record it as MP4 + GIF
 6. Upload the GIF to a `recordloop-recordings` release in your repo
 7. Post a PR comment with the GIF rendered inline
+
+## OSS maintainers: fork PRs with a label gate
+
+The default install in [Quick start](#quick-start) uses an `if:` guard that disables RecordLoop on PRs from forks. That's the right default for private repos, but it kills the entire use case for OSS maintainers — drive-by visual PRs are *exactly* where you want a recording before pulling the branch.
+
+For OSS use the standard GitHub `pull_request_target` + label-gated pattern. Create a label called `recordloop-ok` in your repo, then use this workflow:
+
+```yaml
+name: RecordLoop
+on:
+  pull_request_target:
+    types: [labeled, synchronize]
+permissions:
+  pull-requests: write
+  contents: write
+jobs:
+  recordloop:
+    if: contains(github.event.pull_request.labels.*.name, 'recordloop-ok')
+    runs-on: ubuntu-latest
+    steps:
+      # Check out the PR HEAD (not the base) so we record the contributor's
+      # actual changes — but only because the maintainer applied the label.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: vihaanshahh/recordloop@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+```
+
+Workflow:
+
+1. A contributor opens a PR from their fork.
+2. You glance at the diff (30 seconds — same as you do today).
+3. If it's not malicious, you apply the `recordloop-ok` label.
+4. RecordLoop runs against the contributor's fork code, posts the GIF + assertions to the PR.
+5. You review the GIF in the comment instead of pulling the branch.
+
+The label is the human-in-the-loop. RecordLoop never runs on unlabeled fork PRs, so a hostile contributor can't exfiltrate your OpenAI key by submitting `prompt_injection.tsx`. The label-applier is recorded in the GitHub audit log automatically.
+
+Re-running on `synchronize` keeps the same comment (RecordLoop edits in place), so the label only needs to be applied once per PR.
 
 ## Inputs
 
@@ -123,8 +189,22 @@ A Playwright worker on the runner replays the flow, ffmpeg converts the MP4 to a
 
 - **Only one flow per PR** — picks the single most user-visible change.
 - **Only what changed** — every step in the flow must touch an element on a `+` diff line or sit directly next to one. No generic smoke tests.
+- **At least one real assertion** — the agent is required to emit at least one assertion derived from the diff. A flow without assertions is rendered as `▶ Demo` and does not turn the check green.
 - **Bounded cost** — hard caps on iterations (10), files read (30), and total input tokens (50K).
 - **Bounded surface** — the agent only sees files changed in this PR, never the rest of your repo.
+
+### Assertion vocabulary
+
+The agent picks from four oracle types, derived from the diff:
+
+| Action | Selector | Value | What it checks |
+|---|---|---|---|
+| `assert_text` | CSS selector | expected substring | The element's `textContent` contains the substring. |
+| `assert_attribute` | CSS selector | `attr=expected` | The named attribute contains the expected substring. |
+| `assert_url` | _(unused)_ | expected substring | `page.url` contains the substring. |
+| `assert_visible` | CSS selector | _(unused)_ | The element is present and visible. |
+
+When an assertion fails, the failure reason appears at the top of the PR comment, the GIF still renders (so you can see the broken state), and the workflow exits non-zero — turning the PR check red.
 
 ## Privacy and security
 

@@ -51,6 +51,13 @@ def _flow_title(name: str) -> str:
     return name.replace("_", " ").title()
 
 
+_STATUS_LABELS = {
+    "passed": "✅ Passed",
+    "failed": "❌ Failed",
+    "demo":   "▶ Demo (no assertions)",
+}
+
+
 def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
     if not flows:
         return (
@@ -65,12 +72,13 @@ def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
 
     for f in flows:
         rec = rec_by_name.get(f.name) or {}
-        actions_done = rec.get("actions") or 0
         status = rec.get("status") or ""
+        status_label = _STATUS_LABELS.get(status, "")
 
-        # Heading: human title + source file
+        # Heading: status badge + human title + source file
         file_label = f" · `{f.component_file}`" if f.component_file else ""
-        lines.append(f"### {_flow_title(f.name)}{file_label}")
+        heading_status = f"{status_label} · " if status_label else ""
+        lines.append(f"### {heading_status}{_flow_title(f.name)}{file_label}")
 
         # Single-sentence context (the "why" for the reviewer)
         if f.change_context:
@@ -87,22 +95,34 @@ def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
 
         lines.append("")
 
-        # Steps in collapsible — count shown in summary so no separate badge needed
-        if status == "failed":
-            lines.append(f"_❌ recording failed: {rec.get('error', '')}_")
-        elif not rec and not preview_url and not _env("RECORDLOOP_DETECTED_URL"):
-            lines.append("_📋 planned (no preview URL configured)_")
-        else:
-            summary_label = (
-                f"🎥 {actions_done}/{len(f.steps)} steps recorded"
-                if (after_gif or rec.get("video_url") or rec.get("video"))
-                else f"{len(f.steps)} steps"
+        # Failure breakdown comes BEFORE the collapsed details so reviewers
+        # see what broke without expanding anything.
+        for af in rec.get("assertion_failures") or []:
+            lines.append(
+                f"> ❌ assertion failed — `{af['selector']}` "
+                f"{('(' + af['value'] + ')') if af.get('value') else ''} — {af['reason']}"
             )
-            lines.append(f"<details><summary>{summary_label}</summary>")
+        if rec.get("assertion_failures"):
+            lines.append("")
+
+        if not rec and not preview_url and not _env("RECORDLOOP_DETECTED_URL"):
+            lines.append("_📋 planned (no preview URL configured)_")
+        elif status in ("passed", "failed", "demo"):
+            asserts_passed = rec.get("assertions_passed", 0)
+            asserts_total = rec.get("assertions_total", 0)
+            assertion_summary = (
+                f"{asserts_passed}/{asserts_total} assertions"
+                if asserts_total
+                else "no assertions"
+            )
+            lines.append(
+                f"<details><summary>Flow trace · {len(f.steps)} steps · {assertion_summary}</summary>"
+            )
             lines.append("")
             for s in f.steps:
                 extra = f" — `{s.value}`" if s.value else ""
-                lines.append(f"1. **{s.action}** `{s.selector}`{extra}")
+                marker = "🔍" if s.is_assertion else "•"
+                lines.append(f"- {marker} **{s.action}** `{s.selector}`{extra}")
             lines.append("")
             lines.append("</details>")
 
@@ -149,7 +169,7 @@ async def main() -> int:
 
     # Lazy imports keep cold-start fast and prove the lazy chain still works.
     from api.analyzer import analyze_pr
-    from api.github_client import get_pr_files, post_pr_comment, upload_pr_video
+    from api.github_client import get_pr_files, upsert_pr_comment, upload_pr_video
 
     # 1. Fetch the diff
     try:
@@ -173,7 +193,7 @@ async def main() -> int:
         traceback.print_exc()
         body = f"## RecordLoop\n\n⚠️ Analyzer failed: `{e}`"
         try:
-            await post_pr_comment(repo, pr_number, body, github_token)
+            await upsert_pr_comment(repo, pr_number, body, github_token)
         except Exception:
             pass
         return 1
@@ -187,8 +207,13 @@ async def main() -> int:
         try:
             from api.cloud_recorder import record_flows  # lazy: pulls in playwright
             recordings = await asyncio.to_thread(record_flows, flows, preview_url)
-            ok = sum(1 for r in recordings if r.get("status") == "done")
-            print(f"  recorded {ok}/{len(recordings)} flow(s) with Playwright")
+            passed = sum(1 for r in recordings if r.get("status") == "passed")
+            failed = sum(1 for r in recordings if r.get("status") == "failed")
+            demo   = sum(1 for r in recordings if r.get("status") == "demo")
+            print(
+                f"  recorded {len(recordings)} flow(s): "
+                f"{passed} passed · {failed} failed · {demo} demo"
+            )
         except Exception as e:
             print(f"RecordLoop: recording skipped — {e}", file=sys.stderr)
 
@@ -218,10 +243,17 @@ async def main() -> int:
     # 4. Post the comment
     body = _render_comment(flows, preview_url, recordings)
     try:
-        await post_pr_comment(repo, pr_number, body, github_token)
+        await upsert_pr_comment(repo, pr_number, body, github_token)
         print("  posted PR comment")
     except Exception as e:
         print(f"RecordLoop: failed to post comment — {e}", file=sys.stderr)
+        return 1
+
+    # 5. Fail the workflow if any flow failed an assertion. This is what
+    # makes RecordLoop a TEST and not just a demo recorder: a broken UI
+    # change should turn the PR check red, not just leave a friendly GIF.
+    if recordings and any(r.get("status") == "failed" for r in recordings):
+        print("RecordLoop: at least one flow failed an assertion", file=sys.stderr)
         return 1
 
     return 0

@@ -62,6 +62,46 @@ async def post_pr_comment(repo: str, pr_number: int, body: str, token: str) -> d
     return await _post(url, token, {"body": body})
 
 
+async def upsert_pr_comment(
+    repo: str,
+    pr_number: int,
+    body: str,
+    token: str,
+    marker: str = "## RecordLoop",
+) -> dict:
+    """Edit the existing RecordLoop comment in place, or create one if missing.
+
+    Looks for the first comment whose body starts with ``marker`` and PATCHes
+    it. Falls back to POST when no match is found. This keeps PR threads
+    clean: re-runs on push update the same comment instead of stacking new
+    ones.
+    """
+    list_url = f"{_BASE}/repos/{repo}/issues/{pr_number}/comments?per_page=100"
+    try:
+        comments = await _get(list_url, token)
+    except Exception as e:
+        print(f"[github_client] could not list PR comments, falling back to POST: {e}")
+        return await post_pr_comment(repo, pr_number, body, token)
+
+    existing_id: Optional[int] = None
+    if isinstance(comments, list):
+        for c in comments:
+            if isinstance(c, dict) and (c.get("body") or "").lstrip().startswith(marker):
+                existing_id = c.get("id")
+                break
+
+    if existing_id is not None:
+        patch_url = f"{_BASE}/repos/{repo}/issues/comments/{existing_id}"
+        try:
+            updated = await _patch(patch_url, token, {"body": body})
+            print(f"[github_client] updated existing PR comment {existing_id}")
+            return updated
+        except Exception as e:
+            print(f"[github_client] PATCH failed ({e}), falling back to new comment")
+
+    return await post_pr_comment(repo, pr_number, body, token)
+
+
 async def upload_pr_video(repo: str, pr_number: int, file_path: str, token: str) -> Optional[str]:
     """Upload a video as a GitHub release asset and return its browser_download_url.
 
@@ -174,6 +214,26 @@ async def _post(url: str, token: str, data: dict) -> dict:
                 "Content-Type": "application/json",
                 "User-Agent": "recordloop-api/1.0",
             },
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+
+    return await asyncio.to_thread(_do)
+
+
+async def _patch(url: str, token: str, data: dict) -> dict:
+    def _do():
+        body = json.dumps(data).encode()
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github.v3+json",
+                "Content-Type": "application/json",
+                "User-Agent": "recordloop-api/1.0",
+            },
+            method="PATCH",
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read())

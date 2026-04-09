@@ -51,7 +51,14 @@ def _record_one(flow: InteractionFlow, preview_url: str, label: str = "after") -
         "status": "recording",
         "video": None,
         "video_url": None,
-        "actions": 0,
+        # Assertion outcomes — used by run_action.py to render pass/fail.
+        "assertions_total": 0,
+        "assertions_passed": 0,
+        "assertion_failures": [],  # list of {selector, value, reason}
+        # Interaction outcomes (excluding assertions).
+        "interactions_total": 0,
+        "interactions_done": 0,
+        "interaction_failures": [],
     }
 
     try:
@@ -65,24 +72,46 @@ def _record_one(flow: InteractionFlow, preview_url: str, label: str = "after") -
             # Brief settle so the first frame isn't mid-paint.
             time.sleep(0.4)
 
-            recorded = 0
             for i, step in enumerate(flow.steps):
+                is_assertion = step.is_assertion
+                if is_assertion:
+                    result["assertions_total"] += 1
+                else:
+                    result["interactions_total"] += 1
+
                 # The agent almost always emits navigate as the first step
                 # even though we're already on that page from start_recording.
                 # Skip the redundant initial navigate so the recording doesn't
                 # double-load and so we don't fight Playwright's relative-URL
                 # handling.
                 if i == 0 and step.action.lower() == "navigate":
-                    recorded += 1
+                    result["interactions_done"] += 1
                     continue
+
                 try:
                     _execute(page, recorder, step, preview_url)
-                    recorded += 1
+                    if is_assertion:
+                        result["assertions_passed"] += 1
+                    else:
+                        result["interactions_done"] += 1
                     # Short, even pacing between steps so motion stays
                     # smooth in the GIF without feeling rushed.
                     time.sleep(0.35)
                 except Exception as e:
-                    print(f"[cloud-recorder] step skipped ({step.action} {step.selector}): {e}")
+                    reason = str(e).splitlines()[0][:200]
+                    print(f"[cloud-recorder] {step.action} {step.selector!r} failed: {reason}")
+                    if is_assertion:
+                        result["assertion_failures"].append({
+                            "selector": step.selector,
+                            "value": step.value or "",
+                            "reason": reason,
+                        })
+                    else:
+                        result["interaction_failures"].append({
+                            "action": step.action,
+                            "selector": step.selector,
+                            "reason": reason,
+                        })
 
             # Hold the final frame for a beat so viewers see the end state.
             time.sleep(0.6)
@@ -96,8 +125,15 @@ def _record_one(flow: InteractionFlow, preview_url: str, label: str = "after") -
                 if gif_path:
                     result["gif"] = str(gif_path)
 
-            result["status"] = "done"
-            result["actions"] = recorded
+            # A flow passes only if every assertion passed AND we recorded
+            # at least one assertion. A no-assertion flow is degraded to
+            # "demo" status — recorded but not trusted.
+            if result["assertions_total"] == 0:
+                result["status"] = "demo"
+            elif result["assertion_failures"]:
+                result["status"] = "failed"
+            else:
+                result["status"] = "passed"
 
     except Exception as e:
         result["status"] = "failed"
@@ -176,6 +212,57 @@ def _execute(page, recorder, step: InteractionStep, preview_url: str = ""):
         case "hover":
             page.hover(sel, timeout=8000)
             recorder.record_action(ActionType.HOVER, key=_to_key(sel))
+
+        # -------- assertions --------------------------------------------------
+        # These raise on failure (caught by the loop in _record_one) and the
+        # raised reason flows into result["assertion_failures"]. They DO NOT
+        # call recorder.record_* — assertions are post-hoc oracles, not user
+        # actions, so they shouldn't appear in the SemanticKey trail.
+
+        case "assert_text":
+            actual = (page.text_content(sel, timeout=8000) or "").strip()
+            expected = (val or "").strip()
+            if not expected:
+                raise AssertionError("assert_text requires a non-empty value")
+            if expected not in actual:
+                raise AssertionError(
+                    f"text mismatch — expected substring {expected!r} in {actual[:120]!r}"
+                )
+
+        case "assert_attribute":
+            # value format: "attr_name=expected_substring"
+            raw = val or ""
+            if "=" not in raw:
+                raise AssertionError(
+                    f"assert_attribute value must be 'attr=expected', got {raw!r}"
+                )
+            attr, _, expected = raw.partition("=")
+            attr = attr.strip()
+            expected = expected.strip()
+            page.wait_for_selector(sel, timeout=8000)
+            actual = page.get_attribute(sel, attr)
+            if actual is None:
+                raise AssertionError(f"attribute {attr!r} not present on {sel!r}")
+            if expected not in actual:
+                raise AssertionError(
+                    f"{attr} mismatch — expected substring {expected!r} in {actual!r}"
+                )
+
+        case "assert_url":
+            expected = (val or step.selector or "").strip()
+            actual = page.url
+            if not expected:
+                raise AssertionError("assert_url requires a non-empty value")
+            if expected not in actual:
+                raise AssertionError(
+                    f"url mismatch — expected substring {expected!r} in {actual!r}"
+                )
+
+        case "assert_visible":
+            page.wait_for_selector(sel, state="visible", timeout=8000)
+
+        case _:
+            raise ValueError(f"unknown action {step.action!r}")
 
 
 # ---------------------------------------------------------------------------

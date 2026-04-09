@@ -24,10 +24,16 @@ from typing import Any, Optional
 
 @dataclass
 class InteractionStep:
-    action: str          # click | fill | select | navigate | wait | hover
+    # Interaction actions: click | fill | select | navigate | wait | hover
+    # Assertion actions:   assert_text | assert_attribute | assert_url | assert_visible
+    action: str
     selector: str
     value: Optional[str] = None
     description: str = ""
+
+    @property
+    def is_assertion(self) -> bool:
+        return self.action.lower().startswith("assert_")
 
 
 @dataclass
@@ -69,7 +75,12 @@ _DRY_RUN_FLOWS_PAYLOAD: dict = {
                     "action": "click",
                     "selector": "[data-testid=dry-run]",
                     "description": "Synthetic click",
-                }
+                },
+                {
+                    "action": "assert_visible",
+                    "selector": "[data-testid=dry-run]",
+                    "description": "Synthetic assertion",
+                },
             ],
         }
     ]
@@ -86,8 +97,10 @@ def _dry_run_enabled() -> bool:
 
 _SYSTEM = (
     "You are a frontend QA expert reviewing a pull request. Your job is to "
-    "generate ONE Playwright interaction flow that demonstrates the SPECIFIC "
-    "UI change introduced by this PR — and nothing else.\n\n"
+    "generate ONE Playwright interaction flow that demonstrates AND VERIFIES "
+    "the SPECIFIC UI change introduced by this PR — and nothing else. The "
+    "flow must contain real assertions, not just a navigate-and-click "
+    "screensaver.\n\n"
     "The PR may touch React, Vue, Svelte, Angular, Astro, Blazor, Razor / "
     "ASP.NET, plain HTML, or any server-rendered template (ERB, Jinja, Twig, "
     "Handlebars, Liquid, Phoenix LiveView, PHP, …). Recording is browser-only, "
@@ -104,9 +117,25 @@ _SYSTEM = (
     "button, the flow clicks the copy button. If it changes a form field, "
     "the flow fills that field. If it removes a CTA, the flow navigates and "
     "waits to confirm the page renders without it.\n"
-    "  4. Keep the flow short — 2 to 5 steps total including the initial "
-    "navigate. A long flow that visits unrelated UI is WORSE than a short "
-    "one focused on the diff.\n\n"
+    "  4. Keep the flow short — 3 to 6 steps total including the initial "
+    "navigate AND at least one assertion. A long flow that visits unrelated "
+    "UI is WORSE than a short one focused on the diff.\n"
+    "  5. EVERY flow must contain at least one assertion step that verifies "
+    "the diff actually does what the PR claims. A flow with no assertions "
+    "is rejected — it's a demo, not a test.\n\n"
+    "Available step actions:\n"
+    "  Interaction: navigate, click, fill, select, wait, hover\n"
+    "  Assertions:  assert_text, assert_attribute, assert_url, assert_visible\n"
+    "    • assert_text       — selector + value (substring of element text)\n"
+    "    • assert_attribute  — selector + value formatted as 'attr=expected'\n"
+    "                          e.g. selector=\"[data-testid='nav-link']\",\n"
+    "                          value=\"href=https://example.com\" verifies\n"
+    "                          the href attribute contains the substring.\n"
+    "    • assert_url        — value = expected substring of page.url\n"
+    "    • assert_visible    — selector only; verifies element is visible.\n"
+    "  Pick assertions derived from the diff. If the PR adds an `href` to a\n"
+    "  link, assert_attribute on that href. If it adds visible text, "
+    "assert_text on that text. If it adds a route, assert_url on it.\n\n"
     "Workflow:\n"
     "  1. Call read_diff on every UI file listed. Identify the specific "
     "lines that were added (+) or removed (-) and what they render.\n"
@@ -325,7 +354,12 @@ _TOOLS: list[dict] = [
                                         "properties": {
                                             "action": {
                                                 "type": "string",
-                                                "enum": ["click", "fill", "select", "navigate", "wait", "hover"],
+                                                "enum": [
+                                                    "click", "fill", "select",
+                                                    "navigate", "wait", "hover",
+                                                    "assert_text", "assert_attribute",
+                                                    "assert_url", "assert_visible",
+                                                ],
                                             },
                                             "selector": {"type": "string"},
                                             "value": {"type": "string"},
