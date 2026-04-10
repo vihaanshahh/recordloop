@@ -68,6 +68,7 @@ async def trigger(
         preview_url=req.preview_url or "",
         github_token=req.github_token,
         llm=req.llm,
+        pr_head_sha=req.pr_head_sha or "",
     )
 
     return TriggerResponse(
@@ -96,6 +97,7 @@ async def _run_job(
     preview_url: str,
     github_token: str,
     llm: LLMConfig,
+    pr_head_sha: str = "",
 ):
     job = _jobs[job_id]
 
@@ -105,6 +107,25 @@ async def _run_job(
         changed_files = await get_pr_files(repo, pr_number, github_token)
         job["files_changed"] = len(changed_files)
         print(f"[{job_id}] Fetched {len(changed_files)} changed files")
+
+        # 1b. Fetch repo context + resolve login state
+        repo_context_body = ""
+        storage_state: dict | None = None
+        try:
+            from .repo_context import fetch_recordloop_md
+            repo_ctx = await fetch_recordloop_md(repo, github_token, ref=pr_head_sha)
+            if repo_ctx:
+                repo_context_body = repo_ctx.to_system_message() or ""
+                changed_files = repo_ctx.apply_ignore_paths(changed_files)
+        except Exception as e:
+            print(f"[{job_id}] repo context fetch failed: {e}")
+
+        try:
+            from .login import resolve_storage_state
+            storage_state = resolve_storage_state()
+        except Exception as e:
+            print(f"[{job_id}] WARNING: storage state error (login may fail): {e}")
+            import traceback; traceback.print_exc()
 
         # 2. AI analysis → interaction flows
         provider = (llm.provider or "openai").lower()
@@ -121,6 +142,8 @@ async def _run_job(
             azure.endpoint if azure else None,
             azure.deployment if azure else None,
             azure.api_version if azure else None,
+            repo_context_body=repo_context_body,
+            # ignore_paths already applied to changed_files above (step 1b)
         )
         job["flows_generated"] = len(flows)
         print(f"[{job_id}] {provider} generated {len(flows)} flow(s)")
@@ -134,7 +157,9 @@ async def _run_job(
         # 3. Record with Playwright (skip if no preview URL)
         if preview_url:
             job["status"] = "recording"
-            results = await asyncio.to_thread(record_flows, flows, preview_url)
+            results = await asyncio.to_thread(
+                record_flows, flows, preview_url, storage_state=storage_state,
+            )
             job["recordings"] = results
             print(f"[{job_id}] Recorded {len(results)} flow(s)")
         else:

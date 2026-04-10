@@ -180,6 +180,35 @@ async def main() -> int:
         return 1
     print(f"  fetched {len(changed_files)} changed files")
 
+    # 1b. Fetch repo context (.github/recordloop.md)
+    repo_context_body = ""
+    ignore_paths: list[str] = []
+    pr_head_sha = _env("PR_HEAD_SHA")
+    try:
+        from api.repo_context import fetch_recordloop_md
+        repo_ctx = await fetch_recordloop_md(repo, github_token, ref=pr_head_sha)
+        if repo_ctx:
+            repo_context_body = repo_ctx.to_system_message() or ""
+            ignore_paths = repo_ctx.ignore_paths
+            changed_files = repo_ctx.apply_ignore_paths(changed_files)
+            print(f"  repo context loaded ({len(repo_ctx.body)} chars body, {len(ignore_paths)} ignore patterns)")
+    except Exception as e:
+        print(f"RecordLoop: could not load repo context — {e} (continuing without)")
+
+    # 1c. Resolve login storage state
+    storage_state: dict | None = None
+    try:
+        from api.login import resolve_storage_state
+        storage_state = resolve_storage_state()
+        if storage_state:
+            print("  login: storage-state loaded from RECORDLOOP_STORAGE_STATE")
+    except Exception as e:
+        # User explicitly configured auth — continuing without it would just
+        # record a login page, which is useless.  Fail fast.
+        print(f"RecordLoop: storage state error — {e}", file=sys.stderr)
+        traceback.print_exc()
+        return 1
+
     # 2. Run the agent loop
     try:
         flows = analyze_pr(
@@ -187,6 +216,8 @@ async def main() -> int:
             preview_url=preview_url,
             provider=provider,
             model=model,
+            repo_context_body=repo_context_body,
+            # ignore_paths already applied to changed_files above (step 1b)
         )
     except Exception as e:
         print(f"RecordLoop: analyzer failed — {e}", file=sys.stderr)
@@ -206,7 +237,9 @@ async def main() -> int:
     if flows and preview_url:
         try:
             from api.cloud_recorder import record_flows  # lazy: pulls in playwright
-            recordings = await asyncio.to_thread(record_flows, flows, preview_url)
+            recordings = await asyncio.to_thread(
+                record_flows, flows, preview_url, storage_state=storage_state,
+            )
             passed = sum(1 for r in recordings if r.get("status") == "passed")
             failed = sum(1 for r in recordings if r.get("status") == "failed")
             demo   = sum(1 for r in recordings if r.get("status") == "demo")

@@ -58,6 +58,10 @@ inputs:
     description: 'Node version to install when auto-start is enabled.'
     required: false
     default: '20'
+  storage-state:
+    description: 'Base64-encoded Playwright storageState.json for authenticated pages. Store as a GitHub Secret.'
+    required: false
+    default: ''
 
 outputs:
   flows_count:
@@ -79,7 +83,7 @@ runs:
         # Only the OpenAI SDK. The analyzer + github_client live in this
         # action's own checkout (${{ github.action_path }}) — no pip install
         # of RecordLoop itself.
-        python -m pip install --quiet 'openai>=1.50.0'
+        python -m pip install --quiet 'openai>=1.50.0' 'pyyaml>=6.0'
 
     - name: Install Playwright + ffmpeg (only when we're going to record)
       if: inputs.preview-url != '' || inputs.auto-start != 'false'
@@ -203,6 +207,8 @@ runs:
         MODEL: ${{ inputs.model }}
         PREVIEW_URL: ${{ inputs.preview-url }}
         ACTION_PATH: ${{ github.action_path }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        RECORDLOOP_STORAGE_STATE: ${{ inputs.storage-state }}
         # Threaded into the PR comment so users can click straight to the
         # workflow run page where the video artifact is downloadable.
         WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

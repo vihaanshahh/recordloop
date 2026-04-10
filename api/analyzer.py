@@ -514,6 +514,9 @@ def analyze_pr(
     azure_endpoint: Optional[str] = None,
     azure_deployment: Optional[str] = None,
     azure_api_version: Optional[str] = None,
+    *,
+    repo_context_body: str = "",
+    ignore_paths: Optional[list[str]] = None,
 ) -> list[InteractionFlow]:
     """Generate interaction flows for the changed UI in a PR.
 
@@ -522,11 +525,21 @@ def analyze_pr(
     tools, and lets the model decide how deep to go. Cost is bounded by
     MAX_ITERATIONS, MAX_FILES_READ, and MAX_TOTAL_INPUT_TOKENS.
     """
+    # Pre-filter ignored paths using _glob_match which correctly handles
+    # ``**`` across ``/`` boundaries (fnmatch and PurePosixPath.match do not).
+    if ignore_paths:
+        from .repo_context import _glob_match as _gm
+        changed_files = [
+            f for f in changed_files
+            if not any(_gm(f["filename"], pat) for pat in ignore_paths)
+        ]
+
     # Quick exit: nothing UI-shaped in the PR.
     if not any(_is_component(f["filename"]) for f in changed_files):
         return []
 
-    # Dry-run: skip the loop entirely.
+    # Dry-run: skip the LLM loop but still honour filters above so tests
+    # can verify ignore_paths and component filtering.
     if _dry_run_enabled():
         return _parse_flows(_DRY_RUN_FLOWS_PAYLOAD)
 
@@ -544,8 +557,13 @@ def analyze_pr(
 
     messages: list[dict] = [
         {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": user_message},
     ]
+    # Repo context goes as a SECOND system message — keeps the prefix stable
+    # across PRs for prompt-cache reuse (OpenAI caches identical prefixes
+    # ≥1024 tokens at 50% discount; Anthropic gives 90% with cache_control).
+    if repo_context_body:
+        messages.append({"role": "system", "content": repo_context_body})
+    messages.append({"role": "user", "content": user_message})
 
     client = _build_client(provider, api_key, azure_endpoint, azure_api_version)
     model_name = _resolve_model(provider, model, azure_deployment)

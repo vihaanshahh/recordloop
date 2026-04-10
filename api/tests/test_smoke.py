@@ -12,6 +12,7 @@ mocking api.main.get_pr_files / api.main.post_pr_comment to short-circuit
 GitHub. Recording is skipped by passing preview_url="".
 """
 
+import json
 import os
 from unittest.mock import patch
 
@@ -75,8 +76,9 @@ def test_analyzer_dry_run_returns_synthetic_flow():
     )
     assert len(flows) == 1
     assert flows[0].name == "dry_run_smoke_flow"
-    assert len(flows[0].steps) == 1
+    assert len(flows[0].steps) == 2
     assert flows[0].steps[0].action == "click"
+    assert flows[0].steps[1].action == "assert_visible"
 
 
 def test_analyzer_skips_non_component_files():
@@ -337,3 +339,248 @@ def test_parse_flows_handles_partial_garbage():
     assert flows[0].name == "good"
     assert len(flows[0].steps) == 1
     assert flows[0].steps[0].action == "click"
+
+
+# ---------------------------------------------------------------------------
+# Repo context tests
+# ---------------------------------------------------------------------------
+
+from api.repo_context import parse_recordloop_md, RepoContext, _glob_match  # noqa: E402
+
+
+@pytest.mark.parametrize("filename,pattern,expected", [
+    # ** matches across / boundaries
+    ("docs/guide.md", "docs/**", True),
+    ("docs/deep/nested/file.md", "docs/**", True),
+    ("generated/Bar.tsx", "generated/**", True),
+    ("generated/deep/Bar.tsx", "generated/**", True),
+    # * does NOT match across /
+    ("src/App.tsx", "src/*.tsx", True),
+    ("src/deep/App.tsx", "src/*.tsx", False),
+    # ** in the middle
+    ("src/deep/App.tsx", "src/**/*.tsx", True),
+    # bare * at top level
+    ("README.md", "*.md", True),
+    ("src/App.tsx", "*.md", False),
+    # no match
+    ("other/File.tsx", "generated/**", False),
+])
+def test_glob_match(filename, pattern, expected):
+    assert _glob_match(filename, pattern) == expected, (
+        f"_glob_match({filename!r}, {pattern!r}) should be {expected}"
+    )
+
+
+def test_parse_recordloop_md_full():
+    raw = """---
+ignore_paths:
+  - apps/legacy/**
+  - docs/**
+context_globs:
+  - packages/ui/**
+selector_convention: data-testid
+default_navigate_to: /dashboard
+login_config: storage-state
+---
+
+# Acme Web
+
+This is a B2B analytics dashboard.
+"""
+    ctx = parse_recordloop_md(raw)
+    assert ctx.ignore_paths == ["apps/legacy/**", "docs/**"]
+    assert ctx.context_globs == ["packages/ui/**"]
+    assert ctx.selector_convention == "data-testid"
+    assert ctx.default_navigate_to == "/dashboard"
+    assert ctx.login_config == "storage-state"
+    assert "B2B analytics" in ctx.body
+
+
+def test_parse_recordloop_md_no_frontmatter():
+    raw = "Just a plain markdown file with some notes."
+    ctx = parse_recordloop_md(raw)
+    assert ctx.ignore_paths == []
+    assert ctx.body == "Just a plain markdown file with some notes."
+
+
+def test_parse_recordloop_md_empty():
+    ctx = parse_recordloop_md("")
+    assert ctx.body == ""
+    assert ctx.ignore_paths == []
+
+
+def test_parse_recordloop_md_bad_yaml():
+    raw = """---
+: invalid: yaml: [
+---
+
+Body text here.
+"""
+    ctx = parse_recordloop_md(raw)
+    # Malformed YAML — treat entire file as body
+    assert "Body text" in ctx.body or "invalid" in ctx.body
+
+
+def test_parse_recordloop_md_partial_frontmatter():
+    raw = """---
+ignore_paths:
+  - generated/**
+---
+
+Some context.
+"""
+    ctx = parse_recordloop_md(raw)
+    assert ctx.ignore_paths == ["generated/**"]
+    assert ctx.default_navigate_to == "/"
+    assert ctx.body == "Some context."
+
+
+def test_repo_context_apply_ignore_paths():
+    ctx = RepoContext(ignore_paths=["docs/**", "*.md"])
+    files = [
+        {"filename": "src/App.tsx"},
+        {"filename": "docs/guide.md"},
+        {"filename": "docs/deep/nested/api.md"},
+        {"filename": "README.md"},
+    ]
+    filtered = ctx.apply_ignore_paths(files)
+    assert len(filtered) == 1
+    assert filtered[0]["filename"] == "src/App.tsx"
+
+
+def test_repo_context_to_system_message():
+    empty = RepoContext(body="")
+    assert empty.to_system_message() is None
+
+    full = RepoContext(body="This is a Next.js app.")
+    msg = full.to_system_message()
+    assert msg is not None
+    assert "Next.js app" in msg
+    assert "Repository context" in msg
+
+
+# ---------------------------------------------------------------------------
+# Login tests
+# ---------------------------------------------------------------------------
+
+import base64  # noqa: E402
+from api.login import decode_storage_state, resolve_storage_state  # noqa: E402
+
+
+def test_decode_storage_state_valid():
+    state = {"cookies": [{"name": "session", "value": "abc123"}], "origins": []}
+    encoded = base64.b64encode(json.dumps(state).encode()).decode()
+    result = decode_storage_state(encoded)
+    assert result["cookies"][0]["name"] == "session"
+
+
+def test_decode_storage_state_invalid_base64():
+    with pytest.raises(ValueError, match="base64"):
+        decode_storage_state("not-valid-base64!!!")
+
+
+def test_decode_storage_state_invalid_json():
+    encoded = base64.b64encode(b"not json").decode()
+    with pytest.raises(ValueError, match="JSON"):
+        decode_storage_state(encoded)
+
+
+def test_decode_storage_state_missing_cookies_key():
+    encoded = base64.b64encode(b'{"origins": []}').decode()
+    with pytest.raises(ValueError, match="cookies"):
+        decode_storage_state(encoded)
+
+
+def test_resolve_storage_state_none_when_unset():
+    old = os.environ.pop("RECORDLOOP_STORAGE_STATE", None)
+    try:
+        assert resolve_storage_state() is None
+    finally:
+        if old is not None:
+            os.environ["RECORDLOOP_STORAGE_STATE"] = old
+
+
+def test_resolve_storage_state_from_env():
+    state = {"cookies": [{"name": "s", "value": "v"}], "origins": []}
+    encoded = base64.b64encode(json.dumps(state).encode()).decode()
+    os.environ["RECORDLOOP_STORAGE_STATE"] = encoded
+    try:
+        result = resolve_storage_state()
+        assert result is not None
+        assert result["cookies"][0]["name"] == "s"
+    finally:
+        del os.environ["RECORDLOOP_STORAGE_STATE"]
+
+
+# ---------------------------------------------------------------------------
+# Analyzer integration with new params
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_pr_accepts_repo_context_body():
+    """analyze_pr with repo_context_body kwarg must not break dry-run."""
+    flows = analyze_pr(
+        [{"filename": "src/Foo.tsx", "status": "modified", "content": "<div/>"}],
+        preview_url="http://localhost:3000",
+        repo_context_body="This is a Next.js app with data-testid selectors.",
+    )
+    assert len(flows) == 1
+    assert flows[0].name == "dry_run_smoke_flow"
+
+
+def test_ignore_paths_filters_shallow():
+    """ignore_paths with ** should filter files one level deep."""
+    ctx = RepoContext(ignore_paths=["generated/**"])
+    files = [
+        {"filename": "src/Foo.tsx"},
+        {"filename": "generated/Bar.tsx"},
+    ]
+    filtered = ctx.apply_ignore_paths(files)
+    assert [f["filename"] for f in filtered] == ["src/Foo.tsx"]
+
+
+def test_ignore_paths_filters_deeply_nested():
+    """ignore_paths with ** must match files at arbitrary depth."""
+    ctx = RepoContext(ignore_paths=["generated/**"])
+    files = [
+        {"filename": "src/Foo.tsx"},
+        {"filename": "generated/Bar.tsx"},
+        {"filename": "generated/deep/Baz.tsx"},
+        {"filename": "generated/deep/nested/Qux.tsx"},
+    ]
+    filtered = ctx.apply_ignore_paths(files)
+    assert [f["filename"] for f in filtered] == ["src/Foo.tsx"]
+
+
+def test_ignore_paths_removes_all():
+    """If ignore_paths removes every file, result is empty."""
+    ctx = RepoContext(ignore_paths=["src/**"])
+    files = [{"filename": "src/Foo.tsx"}, {"filename": "src/deep/Bar.tsx"}]
+    filtered = ctx.apply_ignore_paths(files)
+    assert filtered == []
+
+
+def test_analyze_pr_ignore_paths_filters_in_dry_run():
+    """analyze_pr honours ignore_paths even in dry-run mode."""
+    flows = analyze_pr(
+        [
+            {"filename": "src/Foo.tsx", "status": "modified", "content": "<div/>"},
+            {"filename": "generated/Bar.tsx", "status": "modified", "content": "<div/>"},
+            {"filename": "generated/deep/Baz.tsx", "status": "modified", "content": "<div/>"},
+        ],
+        preview_url="http://localhost:3000",
+        ignore_paths=["generated/**"],
+    )
+    # generated/** filtered out, src/Foo.tsx survives -> dry-run flow returned
+    assert len(flows) == 1
+    assert flows[0].name == "dry_run_smoke_flow"
+
+
+def test_analyze_pr_ignore_paths_removes_all_ui():
+    """If ignore_paths removes all UI files, return empty even in dry-run."""
+    flows = analyze_pr(
+        [{"filename": "src/Foo.tsx", "status": "modified", "content": "<div/>"}],
+        preview_url="http://localhost:3000",
+        ignore_paths=["src/**"],
+    )
+    assert flows == []

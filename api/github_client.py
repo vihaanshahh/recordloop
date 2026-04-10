@@ -9,8 +9,9 @@ Used by the cloud API to:
 import asyncio
 import base64
 import json
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Optional
 
 # Import the canonical filter — keeps in sync with the framework list in
@@ -110,7 +111,6 @@ async def upload_pr_video(repo: str, pr_number: int, file_path: str, token: str)
     """
     import mimetypes
     import os
-    import urllib.parse
 
     filename = f"pr-{pr_number}-{os.path.basename(file_path)}"
     content_type = mimetypes.guess_type(file_path)[0] or "video/mp4"
@@ -184,6 +184,28 @@ async def _get_or_create_recordings_release(repo: str, token: str) -> Optional[i
     except Exception as e:
         print(f"[github_client] could not get/create recordings release: {e}")
         return None
+
+
+async def fetch_file_contents(
+    repo: str, path: str, token: str, ref: str = "",
+) -> Optional[str]:
+    """Fetch a single file's UTF-8 contents from a repo.
+
+    Returns None if the file doesn't exist (404). Uses the same
+    base64-decode pattern as get_pr_files.
+    """
+    url = f"{_BASE}/repos/{repo}/contents/{path}"
+    if ref:
+        url += f"?ref={urllib.parse.quote(ref, safe='')}"
+    try:
+        data = await _get(url, token)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    if isinstance(data, dict) and data.get("encoding") == "base64":
+        return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+    return None
 
 
 async def _get(url: str, token: str) -> dict | list:

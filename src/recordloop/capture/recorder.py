@@ -35,6 +35,7 @@ class RecorderConfig:
     viewport_width: int = 1280
     viewport_height: int = 720
     executable_path: str = ""
+    storage_state: dict | str | None = None
 
 
 class PlaywrightRecorder:
@@ -97,17 +98,21 @@ class PlaywrightRecorder:
         video_dir = Path(self.config.video_dir)
         video_dir.mkdir(parents=True, exist_ok=True)
 
-        self._context = self._browser.new_context(
-            viewport={
+        ctx_kwargs: dict = {
+            "viewport": {
                 "width": self.config.viewport_width,
                 "height": self.config.viewport_height,
             },
-            record_video_dir=str(video_dir),
-            record_video_size={
+            "record_video_dir": str(video_dir),
+            "record_video_size": {
                 "width": self.config.viewport_width,
                 "height": self.config.viewport_height,
             },
-        )
+        }
+        if self.config.storage_state is not None:
+            ctx_kwargs["storage_state"] = self.config.storage_state
+
+        self._context = self._browser.new_context(**ctx_kwargs)
         self._page = self._context.new_page()
 
     def _current_timestamp_ms(self) -> int:
