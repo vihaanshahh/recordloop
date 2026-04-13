@@ -27,15 +27,26 @@ def _glob_match(filename: str, pattern: str) -> bool:
     Unlike ``fnmatch``, ``**`` matches across ``/`` boundaries (zero or more
     path segments).  A single ``*`` matches anything except ``/``.
     """
+    if not pattern:
+        return False
     i = 0
     regex = "^"
     while i < len(pattern):
         if pattern[i : i + 2] == "**":
-            regex += ".*"
             i += 2
             # skip trailing / after ** (e.g. **/foo)
             if i < len(pattern) and pattern[i] == "/":
                 i += 1
+            # ** must match whole path segments, not partial names.
+            # If ** is at the start or after /, it matches zero or more
+            # directories.  We anchor it so `**/foo` doesn't match `xfoo`.
+            if i < len(pattern):
+                # more pattern follows — match any prefix ending with /
+                # OR match nothing (** = zero segments)
+                regex += "(.+/)?"
+            else:
+                # ** is at the end — match everything remaining
+                regex += ".*"
         elif pattern[i] == "*":
             regex += "[^/]*"
             i += 1
@@ -150,9 +161,18 @@ def parse_recordloop_md(raw: str) -> RepoContext:
     if not isinstance(data, dict):
         return RepoContext(body=body.strip())
 
+    def _as_list(val) -> list[str]:
+        """Coerce a YAML value to a list of strings.  Handles the common
+        mistake of writing ``ignore_paths: "*.md"`` (string) instead of a list."""
+        if val is None:
+            return []
+        if isinstance(val, str):
+            return [val]
+        return list(val)
+
     return RepoContext(
-        ignore_paths=list(data.get("ignore_paths") or []),
-        context_globs=list(data.get("context_globs") or []),
+        ignore_paths=_as_list(data.get("ignore_paths")),
+        context_globs=_as_list(data.get("context_globs")),
         selector_convention=str(data.get("selector_convention") or ""),
         default_navigate_to=str(data.get("default_navigate_to") or "/"),
         login_config=str(data.get("login_config") or ""),

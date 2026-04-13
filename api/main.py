@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .models import TriggerRequest, TriggerResponse, JobStatus, LLMConfig
 from .analyzer import analyze_pr
-from .github_client import get_pr_files, post_pr_comment
+from .github_client import get_pr_files, upsert_pr_comment
 from .cloud_recorder import record_flows
 
 app = FastAPI(title="RecordLoop API", version="1.0.0")
@@ -124,8 +124,12 @@ async def _run_job(
             from .login import resolve_storage_state
             storage_state = resolve_storage_state()
         except Exception as e:
-            print(f"[{job_id}] WARNING: storage state error (login may fail): {e}")
-            import traceback; traceback.print_exc()
+            # User explicitly configured auth — continuing without it would
+            # just record a login page.  Fail the job.
+            job["status"] = "failed"
+            job["error"] = f"storage state error: {e}"
+            print(f"[{job_id}] FATAL: storage state error — {e}")
+            return
 
         # 2. AI analysis → interaction flows
         provider = (llm.provider or "openai").lower()
@@ -221,7 +225,7 @@ async def _post_comment(repo: str, pr_number: int, token: str, job: dict):
         lines.append("No recordings generated.")
 
     comment = "\n".join(lines)
-    await post_pr_comment(repo, pr_number, comment, token)
+    await upsert_pr_comment(repo, pr_number, comment, token)
 
 
 # ---------------------------------------------------------------------------

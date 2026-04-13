@@ -34,7 +34,7 @@ def client():
 
 @pytest.fixture
 def fake_github():
-    """Patch get_pr_files + post_pr_comment so /trigger never touches GitHub."""
+    """Patch get_pr_files + upsert_pr_comment so /trigger never touches GitHub."""
 
     async def fake_get_pr_files(repo, pr_number, token):
         return [{
@@ -46,11 +46,11 @@ def fake_github():
 
     posted = []
 
-    async def fake_post_pr_comment(repo, pr_number, body, token):
+    async def fake_upsert_pr_comment(repo, pr_number, body, token, **kwargs):
         posted.append({"repo": repo, "pr_number": pr_number, "body": body})
 
     with patch("api.main.get_pr_files", side_effect=fake_get_pr_files), \
-         patch("api.main.post_pr_comment", side_effect=fake_post_pr_comment):
+         patch("api.main.upsert_pr_comment", side_effect=fake_upsert_pr_comment):
         yield posted
 
 
@@ -357,11 +357,31 @@ from api.repo_context import parse_recordloop_md, RepoContext, _glob_match  # no
     # * does NOT match across /
     ("src/App.tsx", "src/*.tsx", True),
     ("src/deep/App.tsx", "src/*.tsx", False),
+    ("src/README.md", "*.md", False),       # star at root doesn't cross /
     # ** in the middle
     ("src/deep/App.tsx", "src/**/*.tsx", True),
+    ("src/deep/nested/App.tsx", "src/**/*.tsx", True),   # triple-deep
+    # ** at start (no leading dir)
+    ("src/deep/nested/Foo.tsx", "**/*.tsx", True),
+    ("Foo.tsx", "**/*.tsx", True),            # root-level file
+    # ** boundary: must not match partial names
+    ("xfoo.tsx", "**/foo.tsx", False),        # xfoo != foo
+    ("src/foo.tsx", "**/foo.tsx", True),      # exact match after /
+    ("foo.tsx", "**/foo.tsx", True),          # exact match at root
+    # leading dot in directory
+    (".github/recordloop.md", ".github/**", True),
+    (".github/workflows/ci.yml", ".github/**", True),
     # bare * at top level
     ("README.md", "*.md", True),
     ("src/App.tsx", "*.md", False),
+    # exact match (no wildcards)
+    ("package.json", "package.json", True),
+    ("src/package.json", "package.json", False),
+    # ? wildcard
+    ("src/App.tsx", "src/???.tsx", True),
+    ("src/AppX.tsx", "src/???.tsx", False),   # 4 chars != 3 ?s
+    # empty pattern
+    ("anything.tsx", "", False),
     # no match
     ("other/File.tsx", "generated/**", False),
 ])
@@ -584,3 +604,76 @@ def test_analyze_pr_ignore_paths_removes_all_ui():
         ignore_paths=["src/**"],
     )
     assert flows == []
+
+
+# ---------------------------------------------------------------------------
+# Additional edge-case tests (from review)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_recordloop_md_windows_line_endings():
+    raw = "---\r\nignore_paths:\r\n  - docs/**\r\n---\r\n\r\nBody here.\r\n"
+    ctx = parse_recordloop_md(raw)
+    assert ctx.ignore_paths == ["docs/**"]
+    assert ctx.body == "Body here."
+
+
+def test_parse_recordloop_md_extra_fields_ignored():
+    raw = """---
+ignore_paths:
+  - docs/**
+version: 99
+experimental_feature: true
+---
+
+Body.
+"""
+    ctx = parse_recordloop_md(raw)
+    assert ctx.ignore_paths == ["docs/**"]
+    assert ctx.body == "Body."
+
+
+def test_parse_recordloop_md_body_with_triple_dash():
+    raw = """---
+selector_convention: data-testid
+---
+
+Some context.
+
+---
+
+More context after the horizontal rule.
+"""
+    ctx = parse_recordloop_md(raw)
+    assert ctx.selector_convention == "data-testid"
+    assert "---" in ctx.body
+    assert "More context" in ctx.body
+
+
+def test_parse_recordloop_md_string_ignore_paths():
+    """If user writes ignore_paths as a string, it should be wrapped in a list."""
+    raw = """---
+ignore_paths: "*.md"
+---
+
+Body.
+"""
+    ctx = parse_recordloop_md(raw)
+    assert ctx.ignore_paths == ["*.md"]
+
+
+def test_decode_storage_state_missing_padding():
+    """Base64 with stripped padding should still decode."""
+    state = {"cookies": [{"name": "s", "value": "v"}], "origins": []}
+    encoded = base64.b64encode(json.dumps(state).encode()).decode()
+    stripped = encoded.rstrip("=")
+    result = decode_storage_state(stripped)
+    assert result["cookies"][0]["name"] == "s"
+
+
+def test_decode_storage_state_empty_cookies_list():
+    """Storage state with empty cookies list should be accepted."""
+    state = {"cookies": [], "origins": []}
+    encoded = base64.b64encode(json.dumps(state).encode()).decode()
+    result = decode_storage_state(encoded)
+    assert result["cookies"] == []

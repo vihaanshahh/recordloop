@@ -35,8 +35,10 @@ def decode_storage_state(base64_encoded: str) -> dict:
 
     try:
         state = json.loads(decoded)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"storage state is not valid JSON: {e}") from e
+    except json.JSONDecodeError:
+        # Don't include the original error — it contains a snippet of the
+        # decoded content which may include session tokens / cookies.
+        raise ValueError("storage state is not valid JSON (decoded base64 is not parseable)")
 
     if not isinstance(state, dict) or "cookies" not in state:
         raise ValueError(
