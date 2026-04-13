@@ -21,9 +21,10 @@ class LLMConfig(BaseModel):
 class TriggerRequest(BaseModel):
     repo: str                                # "owner/repo"
     pr_number: int
-    preview_url: Optional[str] = ""          # Vercel/Netlify/etc. preview URL
+    preview_url: str = ""                     # Vercel/Netlify/etc. preview URL
     github_token: str                        # for reading PR + posting comment
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    pr_head_sha: str = ""                    # for fetching .github/recordloop.md at correct ref
 
 
 class TriggerResponse(BaseModel):

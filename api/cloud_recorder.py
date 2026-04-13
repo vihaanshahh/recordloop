@@ -20,6 +20,8 @@ def record_flows(
     flows: list[InteractionFlow],
     preview_url: str,
     base_url: str = "",  # accepted for backwards compat but no longer used
+    *,
+    storage_state: dict | None = None,
 ) -> list[dict]:
     """Record each interaction flow against the preview URL.
 
@@ -28,10 +30,19 @@ def record_flows(
     runtime for marginal value and the agent now generates a single targeted
     flow per PR anyway.
     """
-    return [_record_one(flow, preview_url, label="after") for flow in flows]
+    return [
+        _record_one(flow, preview_url, label="after", storage_state=storage_state)
+        for flow in flows
+    ]
 
 
-def _record_one(flow: InteractionFlow, preview_url: str, label: str = "after") -> dict:
+def _record_one(
+    flow: InteractionFlow,
+    preview_url: str,
+    label: str = "after",
+    *,
+    storage_state: dict | None = None,
+) -> dict:
     # Lazy import — only pulled in when an actual recording is requested.
     from recordloop.capture.recorder import PlaywrightRecorder, RecorderConfig
 
@@ -42,6 +53,7 @@ def _record_one(flow: InteractionFlow, preview_url: str, label: str = "after") -
         base_url=preview_url,
         video_dir=VIDEO_DIR,
         headless=True,
+        storage_state=storage_state,
     )
 
     result = {
@@ -68,7 +80,16 @@ def _record_one(flow: InteractionFlow, preview_url: str, label: str = "after") -
                 start = preview_url.rstrip("/") + "/" + start.lstrip("/")
 
             page = recorder.start_recording(start)
-            page.wait_for_load_state("networkidle", timeout=10000)
+            # Pages with streaming media, WebGL, or infinite animations never
+            # reach networkidle. Try it first (gives cleaner frame for SPAs
+            # that do have a quiescent state), but fall back gracefully.
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                try:
+                    page.wait_for_load_state("load", timeout=5000)
+                except Exception:
+                    pass
             # Brief settle so the first frame isn't mid-paint.
             time.sleep(0.4)
 
