@@ -80,7 +80,16 @@ def _record_one(
                 start = preview_url.rstrip("/") + "/" + start.lstrip("/")
 
             page = recorder.start_recording(start)
-            page.wait_for_load_state("networkidle", timeout=10000)
+            # Pages with streaming media, WebGL, or infinite animations never
+            # reach networkidle. Try it first (gives cleaner frame for SPAs
+            # that do have a quiescent state), but fall back gracefully.
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                try:
+                    page.wait_for_load_state("load", timeout=5000)
+                except Exception:
+                    pass
             # Brief settle so the first frame isn't mid-paint.
             time.sleep(0.4)
 
