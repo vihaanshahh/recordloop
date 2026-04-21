@@ -66,7 +66,7 @@ def test_health(client):
 
 def test_analyzer_dry_run_returns_synthetic_flow():
     """The analyzer must return a canned flow without any LLM call."""
-    flows = analyze_pr(
+    result = analyze_pr(
         [{
             "filename": "src/components/SignupForm.tsx",
             "status": "modified",
@@ -74,18 +74,22 @@ def test_analyzer_dry_run_returns_synthetic_flow():
         }],
         preview_url="http://localhost:3000",
     )
+    flows = result.flows
     assert len(flows) == 1
     assert flows[0].name == "dry_run_smoke_flow"
     assert len(flows[0].steps) == 2
     assert flows[0].steps[0].action == "click"
     assert flows[0].steps[1].action == "assert_visible"
+    # Dry-run must still populate cost (with model="(dry-run)") so the comment
+    # renderer's cost-footer code path is exercised end-to-end.
+    assert result.cost.model == "(dry-run)"
 
 
 def test_analyzer_skips_non_component_files():
     flows = analyze_pr(
         [{"filename": "README.md", "status": "modified", "content": "# hi"}],
         preview_url="http://localhost:3000",
-    )
+    ).flows
     assert flows == []
 
 
@@ -97,7 +101,7 @@ def test_analyzer_includes_test_and_story_files():
             {"filename": "src/Foo.stories.tsx", "status": "modified", "content": "<div/>"},
         ],
         preview_url="http://localhost:3000",
-    )
+    ).flows
     # Dry-run returns one synthetic flow regardless of how many files came in,
     # but the important thing is the call succeeded (i.e. files were not filtered out).
     assert len(flows) == 1
@@ -107,7 +111,7 @@ def test_analyzer_skips_type_declaration_files():
     flows = analyze_pr(
         [{"filename": "src/types.d.ts", "status": "modified", "content": "export type X = number"}],
         preview_url="http://localhost:3000",
-    )
+    ).flows
     assert flows == []
 
 
@@ -115,7 +119,7 @@ def test_analyzer_skips_jest_snapshots():
     flows = analyze_pr(
         [{"filename": "src/__snapshots__/Foo.test.tsx.snap", "status": "modified", "content": "snap"}],
         preview_url="http://localhost:3000",
-    )
+    ).flows
     assert flows == []
 
 
@@ -543,7 +547,7 @@ def test_analyze_pr_accepts_repo_context_body():
         [{"filename": "src/Foo.tsx", "status": "modified", "content": "<div/>"}],
         preview_url="http://localhost:3000",
         repo_context_body="This is a Next.js app with data-testid selectors.",
-    )
+    ).flows
     assert len(flows) == 1
     assert flows[0].name == "dry_run_smoke_flow"
 
@@ -590,7 +594,7 @@ def test_analyze_pr_ignore_paths_filters_in_dry_run():
         ],
         preview_url="http://localhost:3000",
         ignore_paths=["generated/**"],
-    )
+    ).flows
     # generated/** filtered out, src/Foo.tsx survives -> dry-run flow returned
     assert len(flows) == 1
     assert flows[0].name == "dry_run_smoke_flow"
@@ -602,7 +606,7 @@ def test_analyze_pr_ignore_paths_removes_all_ui():
         [{"filename": "src/Foo.tsx", "status": "modified", "content": "<div/>"}],
         preview_url="http://localhost:3000",
         ignore_paths=["src/**"],
-    )
+    ).flows
     assert flows == []
 
 
@@ -677,3 +681,285 @@ def test_decode_storage_state_empty_cookies_list():
     encoded = base64.b64encode(json.dumps(state).encode()).decode()
     result = decode_storage_state(encoded)
     assert result["cookies"] == []
+
+
+# ---------------------------------------------------------------------------
+# Cost computation + comment-footer rendering
+# ---------------------------------------------------------------------------
+
+from api.analyzer import CostInfo, _price_for, _anthropic_url, _ANTHROPIC_TOOLS, _TOOLS  # noqa: E402
+from api.run_action import _format_cost_footer, _render_comment  # noqa: E402
+
+
+def test_price_for_known_models():
+    assert _price_for("claude-opus-4-7")["input"] == 15.00
+    assert _price_for("claude-opus-4-7")["output"] == 75.00
+    assert _price_for("gpt-4o-mini")["input"] == 0.15
+    # Family prefix match — model with a date suffix should resolve.
+    assert _price_for("gpt-5.4-2026-01-15")["input"] == 5.00
+
+
+def test_price_for_unknown_model_falls_back():
+    p = _price_for("totally-made-up-model")
+    assert p["input"] == 5.0 and p["output"] == 15.0
+
+
+def test_cost_info_finalize_computes_usd():
+    c = CostInfo(provider="anthropic", model="claude-opus-4-7")
+    c.add_usage(input_t=10_000, output_t=2_000)
+    c.finalize()
+    # 10K * $15/M = $0.15 ; 2K * $75/M = $0.15 ; total $0.30
+    assert abs(c.usd - 0.30) < 1e-6
+    assert c.input_tokens == 10_000
+    assert c.output_tokens == 2_000
+
+
+def test_cost_info_finalize_zero_when_no_usage():
+    c = CostInfo(provider="openai", model="gpt-4o-mini")
+    c.finalize()
+    assert c.usd == 0.0
+
+
+def test_cost_info_accumulates_across_calls():
+    c = CostInfo(provider="openai", model="gpt-4o-mini")
+    c.add_usage(1000, 100)
+    c.add_usage(500, 50, cached_t=200)
+    assert c.input_tokens == 1500
+    assert c.output_tokens == 150
+    assert c.cached_input_tokens == 200
+
+
+def test_format_cost_footer_with_real_usage():
+    c = CostInfo(provider="anthropic", model="claude-opus-4-7")
+    c.add_usage(12_300, 1_100)
+    c.finalize()
+    footer = _format_cost_footer(c)
+    assert "claude-opus-4-7" in footer
+    assert "$" in footer
+    assert "12.3K in" in footer
+    assert "1.1K out" in footer
+
+
+def test_format_cost_footer_skips_when_no_tokens():
+    """If the run never made an LLM call, we MUST NOT print a misleading
+    `$0` footer — return empty so the comment looks normal."""
+    c = CostInfo(provider="openai", model="gpt-4o-mini")
+    c.finalize()
+    assert _format_cost_footer(c) == ""
+
+
+def test_format_cost_footer_handles_none():
+    """Older callers that don't pass cost shouldn't break the renderer."""
+    assert _format_cost_footer(None) == ""
+
+
+def test_render_comment_includes_cost_footer():
+    from api.analyzer import InteractionFlow, InteractionStep
+    flow = InteractionFlow(
+        name="hero_cta_clicked",
+        description="Click the hero CTA",
+        component_file="src/Hero.tsx",
+        navigate_to="/",
+        change_context="The PR adds an href; this asserts it.",
+        steps=[
+            InteractionStep(action="click", selector="[data-testid=cta]"),
+            InteractionStep(action="assert_attribute", selector="[data-testid=cta]", value="href=github"),
+        ],
+    )
+    cost = CostInfo(provider="anthropic", model="claude-opus-4-7")
+    cost.add_usage(5000, 500)
+    cost.finalize()
+    body = _render_comment([flow], "https://preview.example.com", recordings=None, cost=cost)
+    assert "claude-opus-4-7" in body
+    assert "RecordLoop" in body
+    # The footer is appended AFTER the body content
+    assert body.rstrip().splitlines()[-1].startswith("_Analyzed by")
+
+
+def test_render_comment_no_flows_includes_cost_footer():
+    cost = CostInfo(provider="anthropic", model="claude-opus-4-7")
+    cost.add_usage(2000, 100)
+    cost.finalize()
+    body = _render_comment([], "", recordings=None, cost=cost)
+    assert "No recordable UI changes" in body
+    assert "claude-opus-4-7" in body
+
+
+# ---------------------------------------------------------------------------
+# Anthropic provider — URL resolution + agent loop
+# ---------------------------------------------------------------------------
+
+
+def test_anthropic_url_resolution():
+    # Empty falls back to native Anthropic v1.
+    assert _anthropic_url("") == "https://api.anthropic.com/v1/messages"
+    assert _anthropic_url(None) == "https://api.anthropic.com/v1/messages"
+    # Bare host gets /v1/messages appended (matches official SDK behavior).
+    assert _anthropic_url("https://api.anthropic.com") == "https://api.anthropic.com/v1/messages"
+    # URL already ending in /v1 just gets /messages appended.
+    assert _anthropic_url("https://api.anthropic.com/v1") == "https://api.anthropic.com/v1/messages"
+    # Foundry's Anthropic-passthrough route — must become /anthropic/v1/messages,
+    # NOT /anthropic/messages (would 404 against the Foundry router).
+    foundry = "https://vishahdev-resource.services.ai.azure.com/anthropic"
+    assert _anthropic_url(foundry) == foundry + "/v1/messages"
+    assert _anthropic_url(foundry + "/") == foundry + "/v1/messages"
+    # Already-final URL passes through unchanged (any path).
+    final = "https://api.anthropic.com/v1/messages"
+    assert _anthropic_url(final) == final
+    foundry_full = "https://X.services.ai.azure.com/anthropic/v1/messages"
+    assert _anthropic_url(foundry_full) == foundry_full
+
+
+def test_anthropic_tools_are_derived_from_openai_tools():
+    """The two tool schemas must stay in sync — derived list keeps them so."""
+    assert len(_ANTHROPIC_TOOLS) == len(_TOOLS)
+    names_openai = {t["function"]["name"] for t in _TOOLS}
+    names_anth = {t["name"] for t in _ANTHROPIC_TOOLS}
+    assert names_openai == names_anth
+    # Anthropic format: input_schema instead of parameters.
+    for t in _ANTHROPIC_TOOLS:
+        assert "input_schema" in t
+        assert "type" not in t  # no OpenAI wrapper
+
+
+def test_anthropic_loop_threads_tool_use_to_submit_flows(monkeypatch):
+    """Drive the anthropic agent loop end-to-end with a fake Foundry response.
+
+    Sequence:
+      1. Model calls read_diff(SignupForm.tsx)
+      2. Tool result is threaded back, model calls submit_flows
+      3. submit_flows terminates the loop; flows are returned with cost.
+    """
+    from api import analyzer as az
+
+    # Disable dry-run for this single test so the anthropic loop actually runs.
+    monkeypatch.delenv("RECORDLOOP_DRY_RUN", raising=False)
+
+    call_count = {"n": 0}
+
+    def fake_post(base_url, api_key, api_version, payload):
+        call_count["n"] += 1
+        # First turn: model decides to read the diff.
+        if call_count["n"] == 1:
+            return {
+                "id": "msg_1",
+                "model": payload["model"],
+                "role": "assistant",
+                "stop_reason": "tool_use",
+                "type": "message",
+                "content": [
+                    {"type": "text", "text": "Let me look at the diff."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_001",
+                        "name": "read_diff",
+                        "input": {"path": "src/components/SignupForm.tsx"},
+                    },
+                ],
+                "usage": {"input_tokens": 1500, "output_tokens": 30},
+            }
+        # Second turn: model submits flows.
+        return {
+            "id": "msg_2",
+            "model": payload["model"],
+            "role": "assistant",
+            "stop_reason": "tool_use",
+            "type": "message",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_002",
+                    "name": "submit_flows",
+                    "input": {
+                        "flows": [
+                            {
+                                "name": "signup_button_click",
+                                "description": "Click the new signup button",
+                                "component_file": "src/components/SignupForm.tsx",
+                                "navigate_to": "/",
+                                "change_context": "The PR adds a Sign up button; flow asserts it is visible.",
+                                "steps": [
+                                    {"action": "click", "selector": "#go"},
+                                    {"action": "assert_visible", "selector": "#go"},
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ],
+            "usage": {"input_tokens": 2200, "output_tokens": 180},
+        }
+
+    monkeypatch.setattr(az, "_anthropic_post", fake_post)
+
+    result = az.analyze_pr(
+        [{
+            "filename": "src/components/SignupForm.tsx",
+            "status": "modified",
+            "content": '<form><button id="go">Sign up</button></form>',
+            "patch": "@@ -1,1 +1,1 @@\n+<button id=\"go\">Sign up</button>",
+        }],
+        preview_url="http://localhost:5173",
+        provider="anthropic",
+        api_key="fake-key",
+        model="claude-opus-4-7",
+        anthropic_base_url="https://vishahdev-resource.services.ai.azure.com/api/projects/vishahdev",
+    )
+
+    assert call_count["n"] == 2, "loop should call _anthropic_post twice (read_diff + submit_flows)"
+    assert len(result.flows) == 1
+    assert result.flows[0].name == "signup_button_click"
+    assert result.flows[0].steps[0].action == "click"
+    # Cost was accumulated across both turns and finalized.
+    assert result.cost.input_tokens == 1500 + 2200
+    assert result.cost.output_tokens == 30 + 180
+    assert result.cost.model == "claude-opus-4-7"
+    assert result.cost.usd > 0
+
+
+def test_anthropic_loop_terminates_on_no_tool_use(monkeypatch):
+    """If the model returns text-only with no tool_use blocks, the loop must
+    stop gracefully and return zero flows (with cost still tracked)."""
+    from api import analyzer as az
+
+    monkeypatch.delenv("RECORDLOOP_DRY_RUN", raising=False)
+
+    def fake_post(base_url, api_key, api_version, payload):
+        return {
+            "id": "msg_x",
+            "model": payload["model"],
+            "role": "assistant",
+            "stop_reason": "end_turn",
+            "type": "message",
+            "content": [{"type": "text", "text": "I have no opinion."}],
+            "usage": {"input_tokens": 800, "output_tokens": 20},
+        }
+
+    monkeypatch.setattr(az, "_anthropic_post", fake_post)
+
+    result = az.analyze_pr(
+        [{"filename": "src/Foo.tsx", "status": "modified", "content": "<div/>"}],
+        preview_url="",
+        provider="anthropic",
+        api_key="fake-key",
+        anthropic_base_url="https://api.anthropic.com/v1",
+    )
+    assert result.flows == []
+    # Cost still tracked even on bail-out.
+    assert result.cost.input_tokens == 800
+    assert result.cost.output_tokens == 20
+
+
+def test_anthropic_missing_api_key_raises(monkeypatch):
+    """Anthropic provider with no key must raise a clear error, not crash deep
+    inside httpx."""
+    from api import analyzer as az
+    monkeypatch.delenv("RECORDLOOP_DRY_RUN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        az.analyze_pr(
+            [{"filename": "src/Foo.tsx", "status": "modified", "content": "<div/>"}],
+            preview_url="",
+            provider="anthropic",
+            api_key=None,
+        )

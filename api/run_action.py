@@ -11,14 +11,21 @@ Playwright is imported lazily inside cloud_recorder and only loaded when
 PREVIEW_URL is non-empty.
 
 Env vars consumed:
-    OPENAI_API_KEY        — required (or AZURE_OPENAI_* if PROVIDER=azure)
+    OPENAI_API_KEY        — required when PROVIDER=openai
+    AZURE_OPENAI_*        — required when PROVIDER=azure
+    ANTHROPIC_API_KEY     — required when PROVIDER=anthropic
+    ANTHROPIC_BASE_URL    — required when PROVIDER=anthropic. Native Anthropic:
+                            https://api.anthropic.com/v1
+                            Azure AI Foundry:
+                            https://<resource>.services.ai.azure.com/api/projects/<project>
+    ANTHROPIC_API_VERSION — optional; sent as ?api-version= for Foundry routes
     GITHUB_TOKEN          — required, must have pull-requests:write + contents:write
     REPO                  — owner/repo, e.g. "vihaanshahh/recordloop"
     PR_NUMBER             — integer
     PREVIEW_URL           — optional; empty = skip Playwright recording
     BASE_URL              — optional; base branch URL for before/after comparison
-    PROVIDER              — "openai" (default) or "azure"
-    MODEL                 — optional; defaults to gpt-5.4
+    PROVIDER              — "openai" (default), "azure", or "anthropic"
+    MODEL                 — optional; defaults to gpt-5.4 / claude-opus-4-7
     GITHUB_OUTPUT         — auto-set by GitHub Actions (output sink path)
 """
 
@@ -58,12 +65,47 @@ _STATUS_LABELS = {
 }
 
 
-def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
+def _format_cost_footer(cost) -> str:
+    """One-line footer showing what this run cost. Returns "" if no cost data."""
+    if cost is None:
+        return ""
+    model = getattr(cost, "model", "") or "unknown"
+    in_t = int(getattr(cost, "input_tokens", 0) or 0)
+    out_t = int(getattr(cost, "output_tokens", 0) or 0)
+    usd = float(getattr(cost, "usd", 0.0) or 0.0)
+    if in_t == 0 and out_t == 0:
+        return ""
+
+    def _fmt_tokens(n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:.1f}K"
+        return str(n)
+
+    if usd >= 0.01:
+        usd_str = f"${usd:.4f}"
+    elif usd > 0:
+        usd_str = f"${usd:.6f}"
+    else:
+        usd_str = "$0"
+
+    cached = int(getattr(cost, "cached_input_tokens", 0) or 0)
+    cache_note = f" · {_fmt_tokens(cached)} cached" if cached else ""
+    return (
+        f"_Analyzed by `{model}` — {usd_str} "
+        f"({_fmt_tokens(in_t)} in / {_fmt_tokens(out_t)} out{cache_note})_"
+    )
+
+
+def _render_comment(flows, preview_url: str, recordings: list | None, cost=None) -> str:
     if not flows:
-        return (
+        body = (
             "## RecordLoop\n\n"
             "_No recordable UI changes detected in this PR._"
         )
+        footer = _format_cost_footer(cost)
+        return f"{body}\n\n{footer}" if footer else body
 
     lines = ["## RecordLoop", ""]
 
@@ -134,6 +176,12 @@ def _render_comment(flows, preview_url: str, recordings: list | None) -> str:
             f"📥 [Download recordings]({workflow_run_url}#artifacts) "
             f"· artifact `recordloop-videos-pr-{_env('PR_NUMBER')}` · 14 days"
         )
+
+    footer = _format_cost_footer(cost)
+    if footer:
+        lines.append("")
+        lines.append("---")
+        lines.append(footer)
 
     return "\n".join(lines)
 
@@ -211,14 +259,18 @@ async def main() -> int:
 
     # 2. Run the agent loop
     try:
-        flows = analyze_pr(
+        result = analyze_pr(
             changed_files=changed_files,
             preview_url=preview_url,
             provider=provider,
             model=model,
             repo_context_body=repo_context_body,
+            anthropic_base_url=_env("ANTHROPIC_BASE_URL") or None,
+            anthropic_api_version=_env("ANTHROPIC_API_VERSION") or None,
             # ignore_paths already applied to changed_files above (step 1b)
         )
+        flows = result.flows
+        cost = result.cost
     except Exception as e:
         print(f"RecordLoop: analyzer failed — {e}", file=sys.stderr)
         traceback.print_exc()
@@ -229,8 +281,14 @@ async def main() -> int:
             pass
         return 1
 
-    print(f"  analyzer produced {len(flows)} flow(s)")
+    print(
+        f"  analyzer produced {len(flows)} flow(s) "
+        f"(model={cost.model} · {cost.input_tokens} in / {cost.output_tokens} out · ${cost.usd:.6f})"
+    )
     _emit_output("flows_count", str(len(flows)))
+    _emit_output("cost_usd", f"{cost.usd:.6f}")
+    _emit_output("input_tokens", str(cost.input_tokens))
+    _emit_output("output_tokens", str(cost.output_tokens))
 
     # 3. Record one clean flow with Playwright
     recordings: list | None = None
@@ -274,7 +332,7 @@ async def main() -> int:
                     print(f"  upload failed for '{rec['name']}' ({url_key}): {url}", file=sys.stderr)
 
     # 4. Post the comment
-    body = _render_comment(flows, preview_url, recordings)
+    body = _render_comment(flows, preview_url, recordings, cost=cost)
     try:
         await upsert_pr_comment(repo, pr_number, body, github_token)
         print("  posted PR comment")

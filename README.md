@@ -140,10 +140,13 @@ Re-running on `synchronize` keeps the same comment (RecordLoop edits in place), 
 | `node-version` | `20` | Node version to install when auto-start is enabled. |
 | `python-version` | `3.12` | Python version to install for the runner. |
 | `model` | `gpt-5.4` | Override the analyzer model. Try `gpt-4o-mini` for the cheapest setup. |
-| `provider` | `openai` | `openai` (default) or `azure`. |
+| `provider` | `openai` | `openai` (default), `azure`, or `anthropic`. |
 | `azure-openai-api-key` | _(empty)_ | Azure OpenAI API key. Required when `provider: azure`. |
 | `azure-openai-endpoint` | _(empty)_ | Azure OpenAI resource endpoint. |
 | `azure-openai-deployment` | _(empty)_ | Azure OpenAI deployment name (used as the model identifier). |
+| `anthropic-api-key` | _(empty)_ | Anthropic API key. Required when `provider: anthropic`. Works for native Anthropic and Azure AI Foundry. |
+| `anthropic-base-url` | _(empty)_ | Base URL. Native: `https://api.anthropic.com/v1`. Foundry: `https://<resource>.services.ai.azure.com/api/projects/<project>` (action appends `/messages`). |
+| `anthropic-api-version` | _(empty)_ | Optional `?api-version=` query param (some Foundry routes need it, e.g. `2024-12-01-preview`). |
 | `github-token` | `${{ github.token }}` | Token used to fetch the PR diff and post the comment. |
 
 ## Provider configuration
@@ -169,6 +172,35 @@ For compliance-friendly routing where the diff never leaves your Azure tenant:
     azure-openai-endpoint: https://my-resource.openai.azure.com
     azure-openai-deployment: gpt-5.4
 ```
+
+### Anthropic (native + Azure AI Foundry)
+
+Use Claude as the analyzer. The same provider works against `api.anthropic.com`
+or against Azure AI Foundry's Anthropic-compatible endpoint — Foundry keeps
+the diff inside your Azure tenant *and* lets you route to Claude.
+
+```yaml
+# Native Anthropic
+- uses: vihaanshahh/recordloop@v1
+  with:
+    provider: anthropic
+    anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+    anthropic-base-url: https://api.anthropic.com/v1
+    model: claude-opus-4-7
+
+# Azure AI Foundry
+- uses: vihaanshahh/recordloop@v1
+  with:
+    provider: anthropic
+    anthropic-api-key: ${{ secrets.AZURE_FOUNDRY_KEY }}
+    anthropic-base-url: https://my-resource.services.ai.azure.com/api/projects/my-project
+    anthropic-api-version: 2024-12-01-preview
+    model: claude-opus-4-7
+```
+
+The action appends `/messages` to `anthropic-base-url` automatically (unless
+you already included it). Both `api-key` and `x-api-key` headers are sent so
+the same input works on either backend.
 
 ## How it works
 

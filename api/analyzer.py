@@ -7,7 +7,14 @@ actually needs via tool calls. The agent decides how deep to go, when to
 stop, and what to ignore. Cost is bounded by hard caps on iterations, files
 read, and cumulative input tokens.
 
-Public API: ``analyze_pr(changed_files, preview_url, ...) -> list[InteractionFlow]``
+Three providers are supported:
+  - openai     OpenAI chat-completions, function-calling tools.
+  - azure      Azure OpenAI chat-completions, function-calling tools.
+  - anthropic  Anthropic Messages API (works against api.anthropic.com OR
+               Azure AI Foundry's Anthropic-compatible endpoint by setting
+               ANTHROPIC_BASE_URL to the Foundry project URL).
+
+Public API: ``analyze_pr(changed_files, preview_url, ...) -> AnalyzeResult``
 """
 
 from __future__ import annotations
@@ -51,11 +58,84 @@ class InteractionFlow:
 # ---------------------------------------------------------------------------
 
 DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7"
 
 MAX_ITERATIONS = 10                 # safety net for runaway loops
 MAX_FILES_READ = 30                 # cumulative read_file calls per PR
 MAX_TOTAL_INPUT_TOKENS = 50_000     # cumulative across the whole loop
 MAX_OUTPUT_TOKENS_PER_TURN = 2048
+
+
+# ---------------------------------------------------------------------------
+# Pricing table (USD per 1M tokens) — used to compute the cost footer in the
+# PR comment. Numbers are approximate; users with custom contracts can ignore
+# them. Anything not listed falls back to _FALLBACK_PRICE.
+# ---------------------------------------------------------------------------
+
+_FALLBACK_PRICE = {"input": 5.0, "output": 15.0}
+
+_PRICE_TABLE: dict[str, dict[str, float]] = {
+    # OpenAI
+    "gpt-5.4":            {"input": 5.00, "output": 15.00},
+    "gpt-5":              {"input": 5.00, "output": 15.00},
+    "gpt-4o":             {"input": 2.50, "output": 10.00},
+    "gpt-4o-mini":        {"input": 0.15, "output": 0.60},
+    "gpt-4.1":            {"input": 2.00, "output": 8.00},
+    "gpt-4.1-mini":       {"input": 0.40, "output": 1.60},
+    # Anthropic (Claude 4.x family)
+    "claude-opus-4-7":    {"input": 15.00, "output": 75.00},
+    "claude-opus-4":      {"input": 15.00, "output": 75.00},
+    "claude-sonnet-4-6":  {"input":  3.00, "output": 15.00},
+    "claude-sonnet-4":    {"input":  3.00, "output": 15.00},
+    "claude-haiku-4-5":   {"input":  1.00, "output":  5.00},
+}
+
+
+def _price_for(model: str) -> dict[str, float]:
+    if not model:
+        return _FALLBACK_PRICE
+    key = model.lower()
+    if key in _PRICE_TABLE:
+        return _PRICE_TABLE[key]
+    # Match on family prefix (e.g. "gpt-5.4-2026-01-15" -> "gpt-5.4")
+    for k, v in _PRICE_TABLE.items():
+        if key.startswith(k):
+            return v
+    return _FALLBACK_PRICE
+
+
+@dataclass
+class CostInfo:
+    """Per-PR LLM cost breakdown surfaced in the PR comment footer."""
+
+    provider: str = ""
+    model: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0  # informational; not subtracted from input_tokens
+    usd: float = 0.0
+
+    def add_usage(self, input_t: int, output_t: int, cached_t: int = 0) -> None:
+        self.input_tokens += int(input_t or 0)
+        self.output_tokens += int(output_t or 0)
+        self.cached_input_tokens += int(cached_t or 0)
+
+    def finalize(self) -> None:
+        price = _price_for(self.model)
+        self.usd = round(
+            (self.input_tokens / 1_000_000) * price["input"]
+            + (self.output_tokens / 1_000_000) * price["output"],
+            6,
+        )
+
+
+@dataclass
+class AnalyzeResult:
+    """Return type for ``analyze_pr``. Carries the flows AND a cost breakdown
+    so the PR-comment renderer can show the user what the run actually cost."""
+
+    flows: list[InteractionFlow] = field(default_factory=list)
+    cost: CostInfo = field(default_factory=CostInfo)
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +461,23 @@ _TOOLS: list[dict] = [
 
 
 # ---------------------------------------------------------------------------
+# Tool schemas (Anthropic format) — same tools, different wrapper. Built by
+# stripping the OpenAI ``function`` wrapper and renaming ``parameters`` to
+# ``input_schema``. Kept as a derived constant so the two schemas can never
+# drift.
+# ---------------------------------------------------------------------------
+
+_ANTHROPIC_TOOLS: list[dict] = [
+    {
+        "name": t["function"]["name"],
+        "description": t["function"]["description"],
+        "input_schema": t["function"]["parameters"],
+    }
+    for t in _TOOLS
+]
+
+
+# ---------------------------------------------------------------------------
 # Tool dispatch
 # ---------------------------------------------------------------------------
 
@@ -457,7 +554,12 @@ def _build_client(
     azure_endpoint: Optional[str],
     azure_api_version: Optional[str],
 ):
-    """Return a configured OpenAI-compatible client and the model/deployment to call."""
+    """Return a configured OpenAI-compatible client.
+
+    NOTE: only used for ``provider in {"openai", "azure"}``. The anthropic
+    provider has its own loop in ``_run_anthropic_loop`` because the request
+    shape, response shape, and tool-use protocol are all different.
+    """
     provider = (provider or "openai").lower()
 
     if provider == "openai":
@@ -482,7 +584,9 @@ def _build_client(
             raise RuntimeError("AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT must be set")
         return AzureOpenAI(api_key=key, azure_endpoint=endpoint, api_version=api_version)
 
-    raise ValueError(f"Unknown provider: {provider!r} (expected 'openai' or 'azure')")
+    raise ValueError(
+        f"Unknown provider: {provider!r} (expected 'openai', 'azure', or 'anthropic')"
+    )
 
 
 def _resolve_model(
@@ -490,14 +594,201 @@ def _resolve_model(
     model: Optional[str],
     azure_deployment: Optional[str],
 ) -> str:
-    if (provider or "openai").lower() == "azure":
+    p = (provider or "openai").lower()
+    if p == "azure":
         return (
             azure_deployment
             or os.environ.get("AZURE_OPENAI_DEPLOYMENT")
             or model
             or DEFAULT_MODEL
         )
+    if p == "anthropic":
+        return (
+            model
+            or os.environ.get("ANTHROPIC_MODEL")
+            or DEFAULT_ANTHROPIC_MODEL
+        )
     return model or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL
+
+
+# ---------------------------------------------------------------------------
+# Anthropic Messages call — works against api.anthropic.com OR Azure AI
+# Foundry's Anthropic-compatible endpoint. We use raw httpx (instead of the
+# anthropic SDK) so we can:
+#   1. Send `api-key` in addition to `x-api-key` (Foundry uses the former).
+#   2. Append the right path to whatever base URL the user gave us.
+#   3. Pass arbitrary api-version query params for Foundry without fighting
+#      the SDK.
+# This keeps the dependency surface to httpx (which the openai SDK pulls in
+# transitively anyway) — no extra wheel to install on the runner.
+# ---------------------------------------------------------------------------
+
+
+def _anthropic_url(base_url: str) -> str:
+    """Resolve the full POST URL, mirroring the official Anthropic SDK's
+    path scheme (``base_url + /v1/messages``).
+
+    Resolution rules:
+      - URL already ends with ``/messages``       → use as-is.
+      - URL already ends with ``/v1``             → append ``/messages``.
+      - URL ends in anything else (incl. empty)   → append ``/v1/messages``.
+
+    Examples:
+      "" or None                                              → https://api.anthropic.com/v1/messages
+      "https://api.anthropic.com"                             → .../v1/messages
+      "https://api.anthropic.com/v1"                          → .../v1/messages
+      "https://X.services.ai.azure.com/anthropic"             → .../anthropic/v1/messages
+      "https://X.services.ai.azure.com/anthropic/v1/messages" → unchanged
+    """
+    u = (base_url or "").rstrip("/")
+    if not u:
+        return "https://api.anthropic.com/v1/messages"
+    if u.endswith("/messages"):
+        return u
+    if u.endswith("/v1"):
+        return u + "/messages"
+    return u + "/v1/messages"
+
+
+def _anthropic_post(
+    base_url: str,
+    api_key: str,
+    api_version: Optional[str],
+    payload: dict,
+) -> dict:
+    import httpx  # transitive dep of openai; always present on the runner
+
+    url = _anthropic_url(base_url)
+    params: dict[str, str] = {}
+    if api_version:
+        # Foundry routes use ?api-version=YYYY-MM-DD-preview
+        params["api-version"] = api_version
+    headers = {
+        # Send both auth header styles: Foundry expects `api-key`, native
+        # Anthropic expects `x-api-key`. Sending both is harmless and means
+        # the same workflow input works against either backend.
+        "api-key": api_key,
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    resp = httpx.post(
+        url,
+        params=params or None,
+        headers=headers,
+        json=payload,
+        timeout=httpx.Timeout(120.0, connect=15.0),
+    )
+    if resp.status_code >= 400:
+        # Mirror the OpenAI SDK's behavior of raising with the body included
+        # so debugging from CI logs is possible.
+        raise RuntimeError(
+            f"Anthropic endpoint returned {resp.status_code}: {resp.text[:500]}"
+        )
+    return resp.json()
+
+
+def _run_anthropic_loop(
+    base_url: str,
+    api_key: str,
+    api_version: Optional[str],
+    model: str,
+    system_blocks: list[str],
+    user_message: str,
+    index: "_FileIndex",
+    cost: CostInfo,
+) -> list[InteractionFlow]:
+    """Anthropic-format agent loop.
+
+    Mirrors the OpenAI loop but speaks the Messages API: assistant turns
+    return ``content`` blocks containing ``text`` and ``tool_use`` items;
+    tool results go back as a single user-role message whose ``content`` is
+    a list of ``tool_result`` blocks. ``stop_reason == "tool_use"`` means
+    keep going; anything else terminates the conversation.
+    """
+    # Anthropic's `system` is a top-level param (not a role). Two stable
+    # blocks (base prompt + repo context) keep cache reuse possible.
+    system: list[dict] = [{"type": "text", "text": s} for s in system_blocks if s]
+
+    # Conversation messages — alternating user/assistant turns. Tool results
+    # are user-role messages with content blocks; assistant turns are
+    # whatever the model returned (text + tool_use blocks).
+    messages: list[dict] = [{"role": "user", "content": user_message}]
+
+    state = {"files_read": 0, "input_tokens": 0}
+
+    for _iteration in range(MAX_ITERATIONS):
+        payload = {
+            "model": model,
+            "max_tokens": MAX_OUTPUT_TOKENS_PER_TURN,
+            "system": system,
+            "messages": messages,
+            "tools": _ANTHROPIC_TOOLS,
+        }
+        resp = _anthropic_post(base_url, api_key, api_version, payload)
+
+        usage = resp.get("usage") or {}
+        in_t = int(usage.get("input_tokens", 0) or 0)
+        out_t = int(usage.get("output_tokens", 0) or 0)
+        cached_t = int(usage.get("cache_read_input_tokens", 0) or 0)
+        cost.add_usage(in_t, out_t, cached_t)
+        state["input_tokens"] += in_t
+
+        content_blocks = resp.get("content") or []
+        # Append the assistant turn verbatim; Anthropic requires the prior
+        # assistant turn to be present before the tool_result reply.
+        messages.append({"role": "assistant", "content": content_blocks})
+
+        tool_uses = [b for b in content_blocks if b.get("type") == "tool_use"]
+        stop_reason = resp.get("stop_reason")
+
+        if not tool_uses:
+            # Model finished without calling submit_flows — no flows.
+            break
+
+        tool_results: list[dict] = []
+        terminated = False
+        for tu in tool_uses:
+            name = tu.get("name", "")
+            args = tu.get("input") or {}
+            tu_id = tu.get("id", "")
+
+            if name == "submit_flows":
+                # Terminal — return immediately. No need to send tool_result
+                # because we don't take another turn.
+                return _parse_flows(args)
+
+            result = _dispatch_tool(name, args, index, state)
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tu_id,
+                    "content": result,
+                }
+            )
+
+        if terminated:
+            break
+
+        messages.append({"role": "user", "content": tool_results})
+
+        # Anthropic sets stop_reason="end_turn" when the model is done — but
+        # if it called tools, it set "tool_use" instead. Our loop only cares
+        # about whether there were tool calls (handled above).
+        del stop_reason
+
+        if state["input_tokens"] >= MAX_TOTAL_INPUT_TOKENS:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"Token budget reached ({state['input_tokens']} / "
+                        f"{MAX_TOTAL_INPUT_TOKENS}). Submit your flows now."
+                    ),
+                }
+            )
+
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -517,14 +808,21 @@ def analyze_pr(
     *,
     repo_context_body: str = "",
     ignore_paths: Optional[list[str]] = None,
-) -> list[InteractionFlow]:
+    anthropic_base_url: Optional[str] = None,
+    anthropic_api_version: Optional[str] = None,
+) -> AnalyzeResult:
     """Generate interaction flows for the changed UI in a PR.
 
     Internally runs an agent loop: hands the LLM an overview of every changed
     file, exposes ``read_file`` / ``read_diff`` / ``list_files`` / ``submit_flows``
     tools, and lets the model decide how deep to go. Cost is bounded by
     MAX_ITERATIONS, MAX_FILES_READ, and MAX_TOTAL_INPUT_TOKENS.
+
+    Returns an ``AnalyzeResult`` with the flows AND a populated ``CostInfo``.
     """
+    provider = (provider or "openai").lower()
+    cost = CostInfo(provider=provider)
+
     # Pre-filter ignored paths using _glob_match which correctly handles
     # ``**`` across ``/`` boundaries (fnmatch and PurePosixPath.match do not).
     if ignore_paths:
@@ -536,12 +834,13 @@ def analyze_pr(
 
     # Quick exit: nothing UI-shaped in the PR.
     if not any(_is_component(f["filename"]) for f in changed_files):
-        return []
+        return AnalyzeResult(flows=[], cost=cost)
 
     # Dry-run: skip the LLM loop but still honour filters above so tests
     # can verify ignore_paths and component filtering.
     if _dry_run_enabled():
-        return _parse_flows(_DRY_RUN_FLOWS_PAYLOAD)
+        cost.model = "(dry-run)"
+        return AnalyzeResult(flows=_parse_flows(_DRY_RUN_FLOWS_PAYLOAD), cost=cost)
 
     index = _FileIndex(changed_files)
     overview = index.overview(only="all", offset=0, limit=200)
@@ -555,6 +854,28 @@ def analyze_pr(
         "wandering into unchanged parts of the page. Call submit_flows when done."
     )
 
+    # ---- Anthropic branch (own loop, own request shape) -----------------
+    if provider == "anthropic":
+        key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        base_url = anthropic_base_url or os.environ.get("ANTHROPIC_BASE_URL", "")
+        api_ver = anthropic_api_version or os.environ.get("ANTHROPIC_API_VERSION") or None
+        if not key:
+            raise RuntimeError("ANTHROPIC_API_KEY not set")
+        cost.model = _resolve_model(provider, model, azure_deployment)
+        flows = _run_anthropic_loop(
+            base_url=base_url,
+            api_key=key,
+            api_version=api_ver,
+            model=cost.model,
+            system_blocks=[_SYSTEM, repo_context_body],
+            user_message=user_message,
+            index=index,
+            cost=cost,
+        )
+        cost.finalize()
+        return AnalyzeResult(flows=flows, cost=cost)
+
+    # ---- OpenAI / Azure OpenAI branch (chat-completions tool-calls) -----
     messages: list[dict] = [
         {"role": "system", "content": _SYSTEM},
     ]
@@ -567,6 +888,7 @@ def analyze_pr(
 
     client = _build_client(provider, api_key, azure_endpoint, azure_api_version)
     model_name = _resolve_model(provider, model, azure_deployment)
+    cost.model = model_name
     state = {"files_read": 0, "input_tokens": 0}
 
     for iteration in range(MAX_ITERATIONS):
@@ -579,7 +901,14 @@ def analyze_pr(
         )
 
         if getattr(resp, "usage", None):
-            state["input_tokens"] += getattr(resp.usage, "prompt_tokens", 0) or 0
+            in_t = getattr(resp.usage, "prompt_tokens", 0) or 0
+            out_t = getattr(resp.usage, "completion_tokens", 0) or 0
+            cached_t = 0
+            details = getattr(resp.usage, "prompt_tokens_details", None)
+            if details is not None:
+                cached_t = getattr(details, "cached_tokens", 0) or 0
+            cost.add_usage(in_t, out_t, cached_t)
+            state["input_tokens"] += in_t
 
         msg = resp.choices[0].message
         tool_calls = msg.tool_calls or []
@@ -604,6 +933,7 @@ def analyze_pr(
             # Model stopped without submitting — bail with whatever we have (nothing).
             break
 
+        submitted: Optional[list[InteractionFlow]] = None
         for tc in tool_calls:
             name = tc.function.name
             try:
@@ -612,7 +942,8 @@ def analyze_pr(
                 args = {}
 
             if name == "submit_flows":
-                return _parse_flows(args)
+                submitted = _parse_flows(args)
+                break
 
             result = _dispatch_tool(name, args, index, state)
             messages.append(
@@ -622,6 +953,10 @@ def analyze_pr(
                     "content": result,
                 }
             )
+
+        if submitted is not None:
+            cost.finalize()
+            return AnalyzeResult(flows=submitted, cost=cost)
 
         # Cost guards
         if state["input_tokens"] >= MAX_TOTAL_INPUT_TOKENS:
@@ -635,7 +970,9 @@ def analyze_pr(
                 }
             )
 
-    return []  # ran out of iterations without submit_flows
+    cost.finalize()
+    return AnalyzeResult(flows=[], cost=cost)
+
 
 
 # ---------------------------------------------------------------------------

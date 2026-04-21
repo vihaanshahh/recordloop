@@ -134,9 +134,17 @@ async def _run_job(
         # 2. AI analysis → interaction flows
         provider = (llm.provider or "openai").lower()
         azure = llm.azure
-        api_key = llm.api_key if provider == "openai" else (azure.api_key if azure else None)
+        anthropic = llm.anthropic
+        if provider == "openai":
+            api_key = llm.api_key
+        elif provider == "azure":
+            api_key = azure.api_key if azure else None
+        elif provider == "anthropic":
+            api_key = anthropic.api_key if anthropic else None
+        else:
+            api_key = None
 
-        flows = await asyncio.to_thread(
+        result = await asyncio.to_thread(
             analyze_pr,
             changed_files,
             preview_url,
@@ -147,10 +155,23 @@ async def _run_job(
             azure.deployment if azure else None,
             azure.api_version if azure else None,
             repo_context_body=repo_context_body,
+            anthropic_base_url=anthropic.base_url if anthropic else None,
+            anthropic_api_version=anthropic.api_version if anthropic else None,
             # ignore_paths already applied to changed_files above (step 1b)
         )
+        flows = result.flows
         job["flows_generated"] = len(flows)
-        print(f"[{job_id}] {provider} generated {len(flows)} flow(s)")
+        job["cost"] = {
+            "provider": result.cost.provider,
+            "model": result.cost.model,
+            "input_tokens": result.cost.input_tokens,
+            "output_tokens": result.cost.output_tokens,
+            "usd": result.cost.usd,
+        }
+        print(
+            f"[{job_id}] {provider} generated {len(flows)} flow(s) "
+            f"(model={result.cost.model} · ${result.cost.usd:.6f})"
+        )
 
         if not flows:
             job["status"] = "done"
@@ -223,6 +244,19 @@ async def _post_comment(repo: str, pr_number: int, token: str, job: dict):
 
     if not recordings and not error and not note:
         lines.append("No recordings generated.")
+
+    cost = job.get("cost") or {}
+    if cost and (cost.get("input_tokens") or cost.get("output_tokens")):
+        in_t = int(cost.get("input_tokens", 0) or 0)
+        out_t = int(cost.get("output_tokens", 0) or 0)
+        usd = float(cost.get("usd", 0.0) or 0.0)
+        usd_str = f"${usd:.4f}" if usd >= 0.01 else f"${usd:.6f}"
+        lines += [
+            "",
+            "---",
+            f"_Analyzed by `{cost.get('model', 'unknown')}` — "
+            f"{usd_str} ({in_t} in / {out_t} out)_",
+        ]
 
     comment = "\n".join(lines)
     await upsert_pr_comment(repo, pr_number, comment, token)
