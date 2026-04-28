@@ -138,9 +138,6 @@ def _record_one(
             video_path = recorder.get_video_path()
             if video_path:
                 result["video"] = str(video_path)
-                gif_path = _make_preview_gif(Path(video_path), label=label)
-                if gif_path:
-                    result["gif"] = str(gif_path)
 
             # A flow passes only if every assertion passed AND we recorded
             # at least one assertion. A no-assertion flow is degraded to
@@ -317,45 +314,6 @@ def _execute(page, recorder, step: InteractionStep, preview_url: str = ""):
 _RE_TESTID = re.compile(r"""\[data-test(?:-)?id=['"]?([^'"\]]+)['"]?\]""")
 _RE_NAME = re.compile(r"""\[name=['"]?([^'"\]]+)['"]?\]""")
 _RE_ARIA = re.compile(r"""\[aria-label=['"]?([^'"\]]+)['"]?\]""")
-
-
-def _make_preview_gif(mp4_path: Path, label: str = "after") -> Optional[Path]:
-    """Convert an MP4 to a palette-optimised GIF for inline GitHub markdown display.
-
-    Caps at 20 s, 8 fps, 640 px wide — keeps file size reasonable while
-    remaining readable in a PR comment.
-    """
-    gif_path = mp4_path.with_name(f"{mp4_path.stem}-{label}.gif")
-    try:
-        # 15 fps + full 256-colour palette + sierra2_4a dither = noticeably
-        # smoother motion than 8 fps / bayer. Cap at 15s to keep file size
-        # reasonable when paired with the higher frame rate.
-        result = subprocess.run(
-            [
-                "ffmpeg", "-y",
-                "-t", "20",
-                "-i", str(mp4_path),
-                "-vf", (
-                    "fps=15,"
-                    "scale=720:-1:flags=lanczos,"
-                    "split[s0][s1];"
-                    "[s0]palettegen=stats_mode=diff[p];"
-                    "[s1][p]paletteuse=dither=sierra2_4a:diff_mode=rectangle"
-                ),
-                "-loop", "0",
-                str(gif_path),
-            ],
-            capture_output=True,
-            timeout=180,
-        )
-        if result.returncode == 0 and gif_path.exists() and gif_path.stat().st_size > 0:
-            size_kb = gif_path.stat().st_size // 1024
-            print(f"[cloud-recorder] GIF created: {gif_path.name} ({size_kb} KB)")
-            return gif_path
-        print(f"[cloud-recorder] GIF conversion failed (rc={result.returncode})")
-    except Exception as e:
-        print(f"[cloud-recorder] GIF conversion error: {e}")
-    return None
 
 
 def _to_key(selector: str):

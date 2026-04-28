@@ -83,11 +83,11 @@ inputs:
     required: false
     default: 'false'
   skip-playwright-install:
-    description: 'Skip pip-installing playwright + downloading chromium + apt-installing ffmpeg. Set to "true" when those are pre-baked into the container image.'
+    description: 'Skip pip-installing playwright + downloading chromium. Set to "true" when those are pre-baked into the container image.'
     required: false
     default: 'false'
   harden-container:
-    description: '"auto" (default), "true", or "false". When enabled, probes for git/node/npm/curl/ca-certificates/ffmpeg and installs whatever is missing using whichever package manager is available (apt > dnf > yum). On "auto", no-ops on ubuntu-latest GitHub-hosted runners and turns itself on for RHEL/Alpine/etc.'
+    description: '"auto" (default), "true", or "false". When enabled, probes for git/node/npm/curl/ca-certificates/python3 and installs whatever is missing using whichever package manager is available (apt > dnf > yum). On "auto", no-ops on ubuntu-latest GitHub-hosted runners and turns itself on for RHEL/Alpine/etc.'
     required: false
     default: 'auto'
   npm-registry:
@@ -176,7 +176,7 @@ runs:
 
         echo "::group::probe"
         cat /etc/os-release || true
-        for bin in git node npm curl ffmpeg python3; do
+        for bin in git node npm curl python3; do
           if command -v "$bin" >/dev/null 2>&1; then
             printf "  ✓ %-8s %s\n" "$bin" "$($bin --version 2>&1 | head -1)"
           else
@@ -233,28 +233,12 @@ runs:
           fi
         fi
 
-        # ffmpeg is best-effort: recorder still produces .webm without it.
-        # Wrap in a subshell with set +e so probing can't kill the outer script.
-        if ! command -v ffmpeg >/dev/null 2>&1; then
-          (
-            set +e
-            if [ "$PM" = "apt" ]; then
-              install_pkg ffmpeg
-            else
-              install_pkg ffmpeg-free \
-                || (install_pkg epel-release && install_pkg ffmpeg-free) \
-                || install_pkg ffmpeg \
-                || echo "⚠ ffmpeg not installable from configured repos — recordings will be .webm only"
-            fi
-          )
-        fi
         echo "::endgroup::"
 
         echo "--- installed versions ---"
         git --version || true
         node --version || true
         npm --version || true
-        ffmpeg -version 2>/dev/null | head -1 || echo "(ffmpeg unavailable — .webm only)"
 
         # Containers run as uid 0 by default; actions/checkout's post-step
         # git operations then fail with "dubious ownership in repository" on
@@ -386,38 +370,12 @@ runs:
         # checkout (${{ github.action_path }}); no pip install of RecordLoop.
         python3 -m pip install --quiet 'openai>=1.50.0' 'pyyaml>=6.0' 'httpx>=0.27.0'
 
-    - name: Install Playwright + ffmpeg (only when we're going to record)
+    - name: Install Playwright (only when we're going to record)
       if: (inputs.preview-url != '' || inputs.auto-start != 'false') && inputs.skip-playwright-install != 'true' && env.RECORDLOOP_HAS_PLAYWRIGHT != '1'
       shell: bash
       run: |
         python3 -m pip install --quiet 'playwright>=1.44.0'
         python3 -m playwright install --with-deps chromium
-        # ffmpeg converts Playwright's .webm → .mp4, then .mp4 → .gif for
-        # inline GitHub comment rendering. Best-effort: if it can't be
-        # installed the recorder falls back to a .webm + text link in the
-        # PR comment. Never fail the job over ffmpeg.
-        if ! command -v ffmpeg >/dev/null 2>&1; then
-          (
-            set +e
-            if command -v apt-get >/dev/null 2>&1; then
-              SUDO=""; [ "$(id -u)" != "0" ] && command -v sudo >/dev/null && SUDO="sudo"
-              $SUDO apt-get update -qq && $SUDO apt-get install -y --no-install-recommends ffmpeg
-            elif command -v dnf >/dev/null 2>&1; then
-              dnf install -y ffmpeg-free \
-                || (dnf install -y epel-release && dnf install -y ffmpeg-free) \
-                || dnf install -y ffmpeg \
-                || true
-            elif command -v yum >/dev/null 2>&1; then
-              yum install -y ffmpeg-free \
-                || (yum install -y epel-release && yum install -y ffmpeg-free) \
-                || yum install -y ffmpeg \
-                || true
-            else
-              echo "⚠ no package manager found — ffmpeg unavailable"
-            fi
-          ) || echo "⚠ ffmpeg install failed — recordings will be .webm + text link (no inline GIF)"
-        fi
-        ffmpeg -version | head -1 || echo "ffmpeg unavailable — recordings will be .webm only"
 
     - name: Checkout user repo (for auto-start)
       if: inputs.preview-url == '' && inputs.auto-start != 'false'

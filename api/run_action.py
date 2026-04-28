@@ -128,13 +128,8 @@ def _render_comment(flows, preview_url: str, recordings: list | None, cost=None)
             lines.append(f.change_context)
         lines.append("")
 
-        after_gif = rec.get("gif_url") or ""
-        if after_gif:
-            lines.append(f"![{_flow_title(f.name)}]({after_gif})")
-        elif rec.get("video_url"):
+        if rec.get("video_url"):
             url = rec["video_url"]
-            # <video> renders inline in GitHub markdown where allowed;
-            # the text link below it is the fallback if the tag is stripped.
             lines.append(f'<video src="{url}" controls width="720"></video>')
             lines.append(f"[▶ Watch recording]({url})")
         elif rec.get("video"):
@@ -333,7 +328,6 @@ async def main() -> int:
         upload_meta: list = []  # (rec_dict, url_key_to_set)
         for r in recordings:
             for path_key, url_key in [
-                ("gif",   "gif_url"),
                 ("video", "video_url"),
             ]:
                 path = r.get(path_key)
