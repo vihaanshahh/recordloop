@@ -127,6 +127,63 @@ You only ever need `openai-api-key`. Everything else has sane defaults.
 | `azure-openai-deployment` | yes (if `provider=azure`) | — | Used as model identifier |
 | `github-token` | no | `${{ github.token }}` | Auto-supplied; you almost never need to override |
 | `python-version` | no | `3.12` | Don't use `"3.x"` — pin a real version |
+| `storage-state` | no | empty | Pre-captured Playwright `storage_state` (base64 or raw JSON). Use for SSO / Auth0 flows the built-in login can't drive. |
+| `login-username`, `login-password` | yes (group: pair) | empty | Activates built-in email/password login. Setting one requires setting both. See A.1.c. |
+| `login-url` | no | `/login` | Override the login page path/URL. |
+| `login-username-selector`, `login-password-selector`, `login-submit-selector` | no | heuristic | CSS selectors. Default heuristics handle ~all standard forms; override only when they mis-target. |
+| `login-success-url` | no | (auto) | URL glob the post-login page must match. When unset, success = the page leaves `login-url` within 30s. |
+| `storybook-config-dir` | no | auto | Path to a `.storybook/` config dir, OR `false` to disable. Auto-detects via `.storybook/main.*` OR a `"storybook"` script in `package.json`. |
+| `storybook-port` | no | `6006` | Override the Storybook static-serve port. |
+| `npm-registry`, `npm-auth-token` | no | empty | Internal Artifactory mirror + token. Skipped if a `.npmrc` already exists. |
+| `pip-index-url` | no | empty | Internal pip mirror. Skipped if `PIP_INDEX_URL` or a `pip.conf` is already set. |
+| `harden-container`, `skip-python-setup`, `skip-runtime-install`, `skip-playwright-install` | no | auto | **Advanced.** The action auto-detects pre-installed `python3`/`playwright`/`chromium` and skips redundant steps. These flags exist only as escape hatches for unusual pre-baked images. |
+
+### A.1.c — Gated apps (login required)
+
+If the user's app gates the UI behind a standard email/password form, do **not** hand-write a custom Playwright login script. Use the built-in login:
+
+```yaml
+- uses: vihaanshahh/recordloop@v1
+  with:
+    openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+    login-username: ${{ secrets.E2E_USER }}
+    login-password: ${{ secrets.E2E_PASS }}
+```
+
+Rules:
+- Only `login-username` + `login-password` are required (as a pair). Everything else has smart defaults: `login-url` → `/login`, selectors → heuristics matching `input[type="email"]` / `input[type="password"]` / `button[type="submit"]`, success → "URL changed from login-url within 30s."
+- Override any default when needed (e.g. `login-url: /auth/sign-in`, `login-success-url: '**/dashboard**'`, `login-username-selector: '#email'`).
+- Credentials never appear in logs; Playwright runs headless and captures `storage_state`, reused when replaying the agent's flow.
+- This is for **first-party email/password forms only**. Auth0 Universal Login, SAML SSO, and any cross-origin redirect must use the existing `storage-state` input with a state captured offline.
+- If both `storage-state` and the login inputs are set, `storage-state` wins.
+
+### A.1.d — Storybook repos
+
+Auto-detected via either `.storybook/main.{js,ts,mjs,cjs}` anywhere in the repo (excluding `node_modules`) OR a `"storybook"` script in `package.json`. The action builds Storybook static and serves it on port 6006 — no config required. For monorepos with multiple `.storybook/` directories, set `storybook-config-dir: apps/<which>/.storybook` to pick. Set `storybook-config-dir: false` to disable and force the action to serve the main app. If `start-command` is set, Storybook detection is automatically skipped.
+
+### A.1.e — Self-hosted / corporate runners
+
+For runs on bare RHEL/Alpine containers, behind an internal Artifactory mirror:
+
+```yaml
+runs-on: [self-hosted, linux]
+container:
+  image: registry.internal/workbench:latest
+steps:
+  - uses: vihaanshahh/recordloop@v1
+    with:
+      provider: anthropic
+      anthropic-api-key: ${{ secrets.AZURE_FOUNDRY_KEY }}
+      anthropic-base-url: https://my-resource.services.ai.azure.com/api/projects/my-project
+      model: claude-opus-4-7
+      # Only set these when you actually need an internal mirror.
+      # Skipped automatically if you already have a .npmrc / pip.conf.
+      npm-registry: https://artifactory.internal/api/npm/npm-virtual/
+      npm-auth-token: ${{ secrets.ARTIFACTORY_TOKEN }}
+      pip-index-url: https://artifactory.internal/api/pypi/pypi-virtual/simple
+```
+
+The action auto-probes the container and only installs missing tools (`git`/`node 20`/`npm`/`curl`/`ffmpeg`/`python3`), defers to any pre-baked Playwright/Chromium it finds, and respects existing `.npmrc` / `pip.conf` config.
 
 ### A.2 — Tell the user how to add the secret
 
@@ -336,6 +393,13 @@ These are the things that go wrong on real installs. Handle each one explicitly.
 | Workflow runs on PRs from forks and fails noisily | Missing the `if:` guard in A.1 | Restore the guard. Forks don't have access to secrets, period. |
 | `recordloop` directory in `.github/workflows/` already exists | RecordLoop is already installed | **Stop.** Don't create a duplicate. Tell the user it's already installed. |
 | User has both Path A and Path B configured | Conflict — both will trigger on the same PR | Pick one. If unsure, ask the user which to keep. |
+| `login-username and login-password must be set together` | User set one but not the other | Set both as a pair. Everything else is optional. |
+| `login: could not find a username/email field` | Heuristic missed the form's input | Open the login page in DevTools, copy the input's CSS selector, set `login-username-selector` (or `-password-selector`/`-submit-selector`). |
+| `login: page is still on <X> 30s after submit` | Credentials wrong, or post-login page is the same URL | Verify the credentials. If the post-login URL legitimately is the same path, set `login-success-url` to a glob that matches a post-login element-bearing page. |
+| `login: page reached <X> but never matched login-success-url glob` | The user-supplied success URL pattern is wrong | Verify the glob (e.g. `**/dashboard**`, `**/app/**`). The action prints the URL the page actually reached. |
+| Storybook auto-detected but user wants the main app | Repo has a `.storybook/` config dir but production serves something else | Set `storybook-config-dir: false` to disable Storybook detection. |
+| `harden-container` runs on a slim image but `apt-get`/`dnf` fail | Container has no package manager at all (distroless) | Tell user the action requires a base image with a package manager OR pre-bake `git`/`node`/`ffmpeg` and set all three `skip-*` flags + `harden-container: false`. |
+| Tokens leak to job logs (`~/.npmrc` printed) | User passed token via `with: npm-auth-token: <literal>` | Always use `${{ secrets.ARTIFACTORY_TOKEN }}` — the action redacts secrets but literal-in-YAML defeats it. |
 
 ---
 

@@ -27,16 +27,17 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 FRAMEWORK_DEFAULTS: dict[str, dict[str, object]] = {
-    "react":   {"port": 3000, "dev_cmd": "npm start"},
-    "next":    {"port": 3000, "dev_cmd": "npm run dev"},
-    "vite":    {"port": 5173, "dev_cmd": "npm run dev"},
-    "vue":     {"port": 5173, "dev_cmd": "npm run dev"},
-    "nuxt":    {"port": 3000, "dev_cmd": "npm run dev"},
-    "angular": {"port": 4200, "dev_cmd": "ng serve"},
-    "svelte":  {"port": 5173, "dev_cmd": "npm run dev"},
-    "gatsby":  {"port": 8000, "dev_cmd": "gatsby develop"},
-    "remix":   {"port": 3000, "dev_cmd": "npm run dev"},
-    "astro":   {"port": 4321, "dev_cmd": "npm run dev"},
+    "react":     {"port": 3000, "dev_cmd": "npm start"},
+    "next":      {"port": 3000, "dev_cmd": "npm run dev"},
+    "vite":      {"port": 5173, "dev_cmd": "npm run dev"},
+    "vue":       {"port": 5173, "dev_cmd": "npm run dev"},
+    "nuxt":      {"port": 3000, "dev_cmd": "npm run dev"},
+    "angular":   {"port": 4200, "dev_cmd": "ng serve"},
+    "svelte":    {"port": 5173, "dev_cmd": "npm run dev"},
+    "gatsby":    {"port": 8000, "dev_cmd": "gatsby develop"},
+    "remix":     {"port": 3000, "dev_cmd": "npm run dev"},
+    "astro":     {"port": 4321, "dev_cmd": "npm run dev"},
+    "storybook": {"port": 6006, "dev_cmd": "npx storybook dev -p 6006"},
 }
 
 
@@ -44,15 +45,40 @@ FRAMEWORK_DEFAULTS: dict[str, dict[str, object]] = {
 # Framework detection
 # ---------------------------------------------------------------------------
 
+def _has_storybook_config(project_dir: Path) -> bool:
+    """True if any ``.storybook/main.{js,ts,mjs,cjs,tsx}`` file exists below
+    *project_dir* (excluding ``node_modules``).
+
+    A package.json with ``@storybook/*`` in its deps is *not* sufficient — many
+    apps include Storybook for component dev but want their main app served in
+    CI. We therefore require an explicit config directory.
+    """
+    if not project_dir.is_dir():
+        return False
+    suffixes = ("main.js", "main.ts", "main.mjs", "main.cjs", "main.tsx")
+    for path in project_dir.rglob("*"):
+        # rglob walks node_modules — short-circuit on it.
+        try:
+            if "node_modules" in path.parts:
+                continue
+        except OSError:
+            continue
+        if path.is_file() and path.parent.name == ".storybook" and path.name in suffixes:
+            return True
+    return False
+
+
 def detect_framework(project_dir: str = ".") -> Optional[str]:
     """Detect the frontend framework by inspecting *package.json*.
 
     Returns the framework name (e.g. ``"react"``, ``"vue"``) or ``None`` when
     no package.json is found or no recognised framework is listed.
 
-    The check order matters: more-specific meta-frameworks (Next, Nuxt, …) are
-    probed before the generic base libraries (React, Vue, …) so that a Next.js
-    project is reported as ``"next"`` rather than ``"react"``.
+    The check order matters: a Storybook config dir wins over everything else
+    (Storybook auto-detection in the action invokes ``storybook build``
+    instead of ``npm start``). Then more-specific meta-frameworks (Next, Nuxt,
+    …) are probed before the generic base libraries (React, Vue, …) so that a
+    Next.js project is reported as ``"next"`` rather than ``"react"``.
 
     When a Vite build tool is detected alongside React, Vue, or Svelte the
     function returns ``"vite"`` so that the correct default dev-server port
@@ -61,6 +87,12 @@ def detect_framework(project_dir: str = ".") -> Optional[str]:
     pkg_path = Path(project_dir) / "package.json"
     if not pkg_path.exists():
         return None
+
+    # Storybook config dir wins regardless of other deps. This mirrors the
+    # action.yml auto-start branch: an explicit .storybook/main.* file is the
+    # clearest signal that this repo wants Storybook served, not the app.
+    if _has_storybook_config(Path(project_dir)):
+        return "storybook"
 
     try:
         pkg = json.loads(pkg_path.read_text(encoding="utf-8"))

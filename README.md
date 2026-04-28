@@ -148,6 +148,19 @@ Re-running on `synchronize` keeps the same comment (RecordLoop edits in place), 
 | `anthropic-base-url` | _(empty)_ | Base URL. Native: `https://api.anthropic.com/v1`. Foundry: `https://<resource>.services.ai.azure.com/api/projects/<project>` (action appends `/messages`). |
 | `anthropic-api-version` | _(empty)_ | Optional `?api-version=` query param (some Foundry routes need it, e.g. `2024-12-01-preview`). |
 | `github-token` | `${{ github.token }}` | Token used to fetch the PR diff and post the comment. |
+| `storage-state` | _(empty)_ | Pre-captured Playwright storage state (base64 JSON or raw JSON). Use this for SSO/Auth0 flows the built-in login can't drive. |
+| `login-username` | _(empty)_ | Username/email for built-in login. Setting this together with `login-password` activates login. |
+| `login-password` | _(empty)_ | Password for built-in login. Required together with `login-username`. |
+| `login-url` | `/login` | Path or absolute URL to the login page. |
+| `login-username-selector` | _(heuristic)_ | CSS selector for the username/email input. Defaults match `input[type="email"]` and common variants — only override when the heuristic mis-targets your form. |
+| `login-password-selector` | _(heuristic)_ | CSS selector for the password input. Default is `input[type="password"]`. |
+| `login-submit-selector` | _(heuristic)_ | CSS selector for the submit button. Defaults match `button[type="submit"]` / "Sign in" / "Log in". |
+| `login-success-url` | _(auto)_ | URL glob the page must reach for success. When unset, success = the page leaves the login URL within 30s. |
+| `storybook-config-dir` | _(auto-detect)_ | Path to a `.storybook` config directory. Set to disambiguate monorepos with multiple, or to `false` to disable. |
+| `storybook-port` | `6006` | Port for the static-served Storybook bundle. |
+| `npm-registry` | _(empty)_ | Optional npm registry URL (e.g. internal Artifactory mirror). Skipped if a `.npmrc` already exists. |
+| `npm-auth-token` | _(empty)_ | Auth token for `npm-registry`. Cleaned up at end of run. |
+| `pip-index-url` | _(empty)_ | Optional pip index URL. Skipped if `PIP_INDEX_URL` or a `pip.conf` is already set. |
 
 ## Provider configuration
 
@@ -201,6 +214,102 @@ the diff inside your Azure tenant *and* lets you route to Claude.
 The action appends `/messages` to `anthropic-base-url` automatically (unless
 you already included it). Both `api-key` and `x-api-key` headers are sent so
 the same input works on either backend.
+
+## Gated apps (login required)
+
+If your app routes the meaningful UI behind a standard email/password form,
+just hand RecordLoop the credentials:
+
+```yaml
+- uses: vihaanshahh/recordloop@v1
+  with:
+    openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+    login-username: ${{ secrets.E2E_USER }}
+    login-password: ${{ secrets.E2E_PASS }}
+```
+
+That's the whole config. RecordLoop navigates to `/login`, finds the email
+and password inputs by heuristic, submits, and waits for the page to leave
+the login URL. The captured Playwright storage state is reused when the
+agent's flow replays, so the recording shows the gated UI, not the login
+screen. Credentials are read from env only and never echoed.
+
+Override anything when the defaults don't fit:
+
+```yaml
+- uses: vihaanshahh/recordloop@v1
+  with:
+    openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+    login-username: ${{ secrets.E2E_USER }}
+    login-password: ${{ secrets.E2E_PASS }}
+    login-url: /auth/sign-in           # default: /login
+    login-success-url: '**/dashboard**' # default: any URL change from login-url
+    # login-username-selector / login-password-selector / login-submit-selector
+    # are also overridable but the heuristics work for almost every form.
+```
+
+**Limitations.** This is for first-party email/password forms. Auth0
+Universal Login, SAML SSO, and any cross-origin redirect flow won't work —
+those need a `storage-state` you've captured offline and pass via the
+existing `storage-state` input.
+
+## Storybook
+
+Repos with a `.storybook/main.{js,ts,mjs,cjs}` config directory are detected
+automatically: the action runs `npx storybook build`, serves the static
+bundle on port 6006, and points the recorder at it. No extra config:
+
+```yaml
+- uses: vihaanshahh/recordloop@v1
+  with:
+    openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+```
+
+Use `storybook-config-dir` to disambiguate in monorepos with multiple
+`.storybook/` directories, or set it to `false` to force the action to serve
+your main app instead.
+
+## Corporate / self-hosted runners
+
+For runs on a bare RHEL/Alpine container, behind an Artifactory mirror, with
+no `git`/`node`/`ffmpeg` pre-installed:
+
+```yaml
+runs-on: [self-hosted, linux]
+container:
+  image: registry.internal/workbench:latest
+steps:
+  - uses: vihaanshahh/recordloop@v1
+    with:
+      provider: anthropic
+      anthropic-api-key: ${{ secrets.AZURE_FOUNDRY_KEY }}
+      anthropic-base-url: https://my-resource.services.ai.azure.com/api/projects/my-project
+      model: claude-opus-4-7
+      # Only set these when you actually need an internal mirror.
+      # Skipped automatically if you already have a .npmrc / pip.conf.
+      npm-registry: https://artifactory.internal/api/npm/npm-virtual/
+      npm-auth-token: ${{ secrets.ARTIFACTORY_TOKEN }}
+      pip-index-url: https://artifactory.internal/api/pypi/pypi-virtual/simple
+```
+
+The action probes the container on every run and only installs what's
+missing — `git` / `node 20` / `npm` / `curl` / `ffmpeg` / `python3`. On
+Ubuntu runners this is a no-op. If `python3` / `playwright` / `chromium`
+are pre-baked into your image, the action skips those steps automatically.
+The `~/.npmrc` it writes is `chmod 600` and removed at end of run.
+
+## Advanced
+
+These inputs exist for niche pre-baked images and override the auto-detection
+above. **You almost never need them** — set them only if the auto-skip
+logic is wrong for your environment.
+
+| Input | Default | Notes |
+|---|---|---|
+| `harden-container` | `auto` | `auto` / `true` / `false`. Force the probe-and-install on/off. `auto` no-ops on Ubuntu. |
+| `skip-python-setup` | `false` | Force-skip `setup-python`. By default the action skips it automatically when the container's `python3` is at or above `python-version`. |
+| `skip-runtime-install` | `false` | Force-skip the pip-install of `openai`/`pyyaml`/`httpx`. Auto-skipped when those modules are already importable. |
+| `skip-playwright-install` | `false` | Force-skip Playwright + Chromium install. Auto-skipped when `playwright` and a Chromium browser cache are already present. |
 
 ## How it works
 

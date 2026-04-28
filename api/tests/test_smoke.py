@@ -963,3 +963,112 @@ def test_anthropic_missing_api_key_raises(monkeypatch):
             provider="anthropic",
             api_key=None,
         )
+
+
+# ---------------------------------------------------------------------------
+# Storybook framework detection
+# ---------------------------------------------------------------------------
+
+def _write_pkg(dir_path, deps=None, dev_deps=None):
+    pkg = {"name": "fixture", "version": "0.0.0"}
+    if deps:
+        pkg["dependencies"] = deps
+    if dev_deps:
+        pkg["devDependencies"] = dev_deps
+    (dir_path / "package.json").write_text(json.dumps(pkg))
+
+
+def test_detect_framework_storybook_via_config_dir(tmp_path):
+    """An explicit .storybook/main.ts wins over @storybook/* in deps."""
+    from recordloop.config.settings import detect_framework
+    _write_pkg(tmp_path, deps={"react": "^18.0.0"}, dev_deps={"@storybook/react": "^8.0.0"})
+    sb = tmp_path / "apps" / "storybook" / ".storybook"
+    sb.mkdir(parents=True)
+    (sb / "main.ts").write_text("export default {};")
+    assert detect_framework(str(tmp_path)) == "storybook"
+
+
+def test_detect_framework_storybook_ignored_when_no_config_dir(tmp_path):
+    """A repo with @storybook/* in deps but no .storybook config must NOT be
+    detected as storybook — many apps embed Storybook for component dev but
+    want their main app served in CI."""
+    from recordloop.config.settings import detect_framework
+    _write_pkg(tmp_path, deps={"react": "^18.0.0", "next": "^14.0.0"}, dev_deps={"@storybook/react": "^8.0.0"})
+    # No .storybook/main.* — falls back to next.
+    assert detect_framework(str(tmp_path)) == "next"
+
+
+def test_detect_framework_storybook_skips_node_modules(tmp_path):
+    """A .storybook/main.ts under node_modules is library code, not a real
+    config — must not match."""
+    from recordloop.config.settings import detect_framework
+    _write_pkg(tmp_path, deps={"react": "^18.0.0"})
+    fake = tmp_path / "node_modules" / "@storybook" / "react" / ".storybook"
+    fake.mkdir(parents=True)
+    (fake / "main.ts").write_text("export default {};")
+    # Falls back to react, not storybook.
+    assert detect_framework(str(tmp_path)) == "react"
+
+
+def test_framework_defaults_includes_storybook():
+    from recordloop.config.settings import FRAMEWORK_DEFAULTS
+    assert FRAMEWORK_DEFAULTS["storybook"]["port"] == 6006
+
+
+# ---------------------------------------------------------------------------
+# login_capture: env-validation + URL resolution (no browser needed)
+# ---------------------------------------------------------------------------
+
+def test_login_capture_resolve_absolute_url():
+    from api.login_capture import _resolve_login_url
+    assert _resolve_login_url("https://app.example.com/login", "") == \
+        "https://app.example.com/login"
+
+
+def test_login_capture_resolve_relative_url():
+    from api.login_capture import _resolve_login_url
+    assert _resolve_login_url("/login", "http://localhost:3000") == \
+        "http://localhost:3000/login"
+
+
+def test_login_capture_resolve_relative_no_base_raises():
+    from api.login_capture import _resolve_login_url
+    with pytest.raises(SystemExit, match="login-url is relative"):
+        _resolve_login_url("/login", "")
+
+
+def test_login_capture_main_missing_credentials_returns_2(monkeypatch):
+    """If username or password is missing, login_capture should exit 2 with a
+    clear message (and not even import playwright)."""
+    from api import login_capture
+    for var in (
+        "RECORDLOOP_LOGIN_URL",
+        "RECORDLOOP_LOGIN_USERNAME",
+        "RECORDLOOP_LOGIN_PASSWORD",
+        "RECORDLOOP_LOGIN_USERNAME_SELECTOR",
+        "RECORDLOOP_LOGIN_PASSWORD_SELECTOR",
+        "RECORDLOOP_LOGIN_SUBMIT_SELECTOR",
+        "RECORDLOOP_LOGIN_SUCCESS_URL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    rc = login_capture.main()
+    assert rc == 2
+
+
+def test_login_capture_main_username_only_returns_2(monkeypatch):
+    """Setting username without password is a partial config and must fail."""
+    from api import login_capture
+    monkeypatch.setenv("RECORDLOOP_LOGIN_USERNAME", "alice@example.com")
+    monkeypatch.delenv("RECORDLOOP_LOGIN_PASSWORD", raising=False)
+    rc = login_capture.main()
+    assert rc == 2
+
+
+def test_login_capture_defaults_present():
+    """Smart-default selectors are non-empty and look like CSS — this is what
+    makes the login-* selector inputs optional."""
+    from api import login_capture
+    assert "input[type=\"email\"]" in login_capture._DEFAULT_USERNAME_SELECTOR
+    assert "input[type=\"password\"]" in login_capture._DEFAULT_PASSWORD_SELECTOR
+    assert "button[type=\"submit\"]" in login_capture._DEFAULT_SUBMIT_SELECTOR
+    assert login_capture._DEFAULT_LOGIN_URL == "/login"

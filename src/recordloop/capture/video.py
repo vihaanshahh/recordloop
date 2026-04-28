@@ -6,13 +6,21 @@ FFmpeg helpers for converting Playwright's .webm recordings to .mp4.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
 
 
 def ffmpeg_available() -> bool:
-    """Check if ffmpeg is on PATH."""
+    """Return False if ffmpeg is absent OR RECORDLOOP_NO_FFMPEG=1 is set.
+
+    Set RECORDLOOP_NO_FFMPEG=1 in the workflow env to simulate the no-ffmpeg
+    path without actually removing ffmpeg — useful for testing that the
+    <video> fallback in the PR comment renders correctly.
+    """
+    if os.environ.get("RECORDLOOP_NO_FFMPEG") == "1":
+        return False
     return shutil.which("ffmpeg") is not None
 
 

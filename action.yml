@@ -86,6 +86,58 @@ inputs:
     description: 'Skip pip-installing playwright + downloading chromium + apt-installing ffmpeg. Set to "true" when those are pre-baked into the container image.'
     required: false
     default: 'false'
+  harden-container:
+    description: '"auto" (default), "true", or "false". When enabled, probes for git/node/npm/curl/ca-certificates/ffmpeg and installs whatever is missing using whichever package manager is available (apt > dnf > yum). On "auto", no-ops on ubuntu-latest GitHub-hosted runners and turns itself on for RHEL/Alpine/etc.'
+    required: false
+    default: 'auto'
+  npm-registry:
+    description: 'Optional npm registry URL (e.g. internal Artifactory mirror). When set, written into ~/.npmrc before any npm install.'
+    required: false
+    default: ''
+  npm-auth-token:
+    description: 'Optional auth token for npm-registry. Written into ~/.npmrc as //<host>/:_authToken=<token>. Cleaned up at the end of the run.'
+    required: false
+    default: ''
+  pip-index-url:
+    description: 'Optional pip index URL (e.g. internal Artifactory mirror). Exported as PIP_INDEX_URL + PIP_TRUSTED_HOST so all subsequent pip steps inherit it.'
+    required: false
+    default: ''
+  storybook-config-dir:
+    description: 'Path to the Storybook config directory (e.g. apps/storybook/.storybook). When unset (default), the action looks for any .storybook/main.{js,ts,mjs,cjs} or a "storybook" script in package.json. Set to "false" to disable Storybook auto-detection entirely.'
+    required: false
+    default: ''
+  storybook-port:
+    description: 'Port for the static-served Storybook bundle. Default 6006.'
+    required: false
+    default: '6006'
+  login-username:
+    description: 'Username/email to fill into the login form. Setting this together with login-password turns on built-in login. Use a secret.'
+    required: false
+    default: ''
+  login-password:
+    description: 'Password to fill into the login form. Required together with login-username. Use a secret.'
+    required: false
+    default: ''
+  login-url:
+    description: 'Path or absolute URL to the login page. Defaults to /login.'
+    required: false
+    default: ''
+  login-username-selector:
+    description: 'CSS selector for the username/email input. Optional — defaults to a heuristic that matches input[type=email], input[name=email|username], etc. Override only when the heuristic mis-targets your form.'
+    required: false
+    default: ''
+  login-password-selector:
+    description: 'CSS selector for the password input. Optional — defaults to input[type=password].'
+    required: false
+    default: ''
+  login-submit-selector:
+    description: 'CSS selector for the submit button. Optional — defaults to button[type=submit] / "Sign in" / "Log in".'
+    required: false
+    default: ''
+  login-success-url:
+    description: 'Optional URL glob the page must reach for login to count as successful (e.g. **/dashboard**). When unset, success = the page leaves login-url within 30s.'
+    required: false
+    default: ''
 
 outputs:
   flows_count:
@@ -104,14 +156,227 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    - name: Harden container (probe + install missing tools)
+      if: inputs.harden-container != 'false'
+      shell: bash
+      env:
+        HARDEN_MODE: ${{ inputs.harden-container }}
+      run: |
+        set -e
+        # "auto": no-op on Ubuntu (GitHub-hosted runners already have everything).
+        # Skipped if /etc/os-release reports ID=ubuntu. "true" forces probing.
+        OS_ID=""
+        if [ -r /etc/os-release ]; then
+          OS_ID="$(. /etc/os-release && echo "${ID:-}")"
+        fi
+        if [ "$HARDEN_MODE" = "auto" ] && [ "$OS_ID" = "ubuntu" ]; then
+          echo "harden-container=auto on Ubuntu — nothing to do"
+          exit 0
+        fi
+
+        echo "::group::probe"
+        cat /etc/os-release || true
+        for bin in git node npm curl ffmpeg python3; do
+          if command -v "$bin" >/dev/null 2>&1; then
+            printf "  ✓ %-8s %s\n" "$bin" "$($bin --version 2>&1 | head -1)"
+          else
+            printf "  ✗ %-8s (missing)\n" "$bin"
+          fi
+        done
+        echo "::endgroup::"
+
+        # Pick package manager + sudo prefix.
+        PM=""
+        if command -v apt-get >/dev/null 2>&1; then PM=apt
+        elif command -v dnf >/dev/null 2>&1; then PM=dnf
+        elif command -v yum >/dev/null 2>&1; then PM=yum
+        else
+          echo "harden-container: no apt-get/dnf/yum on PATH — cannot install missing tools"
+          if [ "$HARDEN_MODE" = "true" ]; then exit 1; fi
+          # auto mode: warn and continue; subsequent steps will fail with their own errors
+          exit 0
+        fi
+        SUDO=""
+        if [ "$(id -u)" != "0" ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
+
+        echo "::group::install missing tools (pm=$PM)"
+        if [ "$PM" = "apt" ]; then $SUDO apt-get update -qq; fi
+
+        install_pkg() {
+          case "$PM" in
+            apt)     $SUDO apt-get install -y --no-install-recommends "$@" ;;
+            dnf|yum) $SUDO "$PM" install -y "$@" ;;
+          esac
+        }
+
+        command -v curl >/dev/null 2>&1 || install_pkg curl ca-certificates
+        command -v git  >/dev/null 2>&1 || install_pkg git
+
+        # Storybook 8 requires node >= 18. RHEL 9's default nodejs module is 16,
+        # so reset/enable nodejs:20 before installing on dnf/yum.
+        install_node_modern() {
+          if [ "$PM" = "apt" ]; then
+            install_pkg nodejs npm
+          else
+            $SUDO "$PM" module reset -y nodejs 2>/dev/null || true
+            $SUDO "$PM" module enable -y nodejs:20 2>/dev/null || true
+            install_pkg nodejs npm
+          fi
+        }
+        if ! command -v node >/dev/null 2>&1; then
+          install_node_modern
+        else
+          NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+          if [ "$NODE_MAJOR" -lt 18 ]; then
+            echo "node $NODE_MAJOR too old for Storybook 8 — upgrading"
+            install_node_modern
+          fi
+        fi
+
+        # ffmpeg is best-effort: recorder still produces .webm without it.
+        # Wrap in a subshell with set +e so probing can't kill the outer script.
+        if ! command -v ffmpeg >/dev/null 2>&1; then
+          (
+            set +e
+            if [ "$PM" = "apt" ]; then
+              install_pkg ffmpeg
+            else
+              install_pkg ffmpeg-free \
+                || (install_pkg epel-release && install_pkg ffmpeg-free) \
+                || install_pkg ffmpeg \
+                || echo "⚠ ffmpeg not installable from configured repos — recordings will be .webm only"
+            fi
+          )
+        fi
+        echo "::endgroup::"
+
+        echo "--- installed versions ---"
+        git --version || true
+        node --version || true
+        npm --version || true
+        ffmpeg -version 2>/dev/null | head -1 || echo "(ffmpeg unavailable — .webm only)"
+
+        # Containers run as uid 0 by default; actions/checkout's post-step
+        # git operations then fail with "dubious ownership in repository" on
+        # the workspace tree (mounted from the host with a different uid).
+        # Mark every directory safe to avoid that — the workflow already
+        # trusts the repo it just checked out.
+        if command -v git >/dev/null 2>&1; then
+          git config --global --add safe.directory '*' || true
+        fi
+
+    - name: Detect pre-installed tools
+      shell: bash
+      env:
+        REQUESTED_PY: ${{ inputs.python-version }}
+      run: |
+        # Auto-detect what's already on the runner so we can skip redundant
+        # steps. Exports three flags to $GITHUB_ENV; subsequent steps treat
+        # them as hints (the explicit skip-* inputs still win).
+        #
+        #   RECORDLOOP_HAS_PYTHON     — python3 present at >= requested version
+        #   RECORDLOOP_HAS_RUNTIME    — openai/pyyaml/httpx already importable
+        #   RECORDLOOP_HAS_PLAYWRIGHT — playwright module + chromium cache present
+
+        if command -v python3 >/dev/null 2>&1; then
+          PY_VER="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+          # Compare major.minor numerically: 3.12 >= 3.12, 3.13 >= 3.12, etc.
+          if python3 -c "import sys; sys.exit(0 if sys.version_info[:2] >= tuple(int(x) for x in '${REQUESTED_PY:-3.12}'.split('.')[:2]) else 1)"; then
+            echo "✓ python3 $PY_VER present (>= requested $REQUESTED_PY) — will skip setup-python"
+            echo "RECORDLOOP_HAS_PYTHON=1" >> "$GITHUB_ENV"
+          else
+            echo "✗ python3 $PY_VER older than requested $REQUESTED_PY — will run setup-python"
+          fi
+
+          if python3 -c "import openai, yaml, httpx" 2>/dev/null; then
+            echo "✓ runtime deps already importable — will skip pip install"
+            echo "RECORDLOOP_HAS_RUNTIME=1" >> "$GITHUB_ENV"
+          fi
+
+          if python3 -c "import playwright" 2>/dev/null; then
+            # Playwright caches Chromium under ~/.cache/ms-playwright by default.
+            # If the module is importable AND any chromium dir exists, treat
+            # Playwright as fully installed.
+            CACHE_DIR="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
+            if ls -d "$CACHE_DIR"/chromium* >/dev/null 2>&1; then
+              echo "✓ playwright + chromium present — will skip playwright install"
+              echo "RECORDLOOP_HAS_PLAYWRIGHT=1" >> "$GITHUB_ENV"
+            fi
+          fi
+        else
+          echo "no python3 on PATH — will run setup-python"
+        fi
+
     - name: Set up Python
-      if: inputs.skip-python-setup != 'true'
+      if: inputs.skip-python-setup != 'true' && env.RECORDLOOP_HAS_PYTHON != '1'
       uses: actions/setup-python@v5
       with:
         python-version: ${{ inputs.python-version }}
 
+    - name: Configure package registries (npm + pip)
+      if: inputs.npm-registry != '' || inputs.pip-index-url != ''
+      shell: bash
+      env:
+        NPM_REGISTRY: ${{ inputs.npm-registry }}
+        NPM_AUTH_TOKEN: ${{ inputs.npm-auth-token }}
+        PIP_INDEX_URL_INPUT: ${{ inputs.pip-index-url }}
+      run: |
+        set -e
+        # Respect existing user config — if the user already has a project
+        # .npmrc or ~/.npmrc OR a pip.conf OR PIP_INDEX_URL set in env, leave
+        # it alone. The recordloop inputs are *additions* to whatever you
+        # already have, not replacements. We only write our own block when
+        # there's no existing matching registry/index already configured.
+
+        # ---- npm ----
+        if [ -n "$NPM_REGISTRY" ]; then
+          # Detect any existing registry config (project .npmrc OR ~/.npmrc).
+          NPMRC_HAS_REGISTRY=0
+          for f in ./.npmrc "$HOME/.npmrc"; do
+            if [ -f "$f" ] && grep -q '^registry=' "$f"; then
+              NPMRC_HAS_REGISTRY=1
+              echo "npm: existing registry config found at $f — leaving it untouched"
+              break
+            fi
+          done
+          if [ "$NPMRC_HAS_REGISTRY" -eq 0 ]; then
+            echo "configuring npm registry: $NPM_REGISTRY"
+            # Write to ~/.npmrc (HOME, not project root) so the token can't
+            # be accidentally published by an upload-artifact step against
+            # the workspace tree. Cleaned up at end-of-run.
+            REG="${NPM_REGISTRY%/}"
+            {
+              echo "registry=$REG/"
+              if [ -n "$NPM_AUTH_TOKEN" ]; then
+                REG_NO_SCHEME="${REG#http://}"
+                REG_NO_SCHEME="${REG_NO_SCHEME#https://}"
+                echo "//${REG_NO_SCHEME}/:_authToken=${NPM_AUTH_TOKEN}"
+              fi
+            } >> "$HOME/.npmrc"
+            chmod 600 "$HOME/.npmrc"
+          fi
+        fi
+
+        # ---- pip ----
+        if [ -n "$PIP_INDEX_URL_INPUT" ]; then
+          # If the env or any pip config already specifies an index, defer
+          # to that. Don't override what the runner image / user set.
+          if [ -n "${PIP_INDEX_URL:-}" ]; then
+            echo "pip: PIP_INDEX_URL already set in env ($PIP_INDEX_URL) — leaving it untouched"
+          elif [ -f "$HOME/.config/pip/pip.conf" ] || [ -f "$HOME/.pip/pip.conf" ] || [ -f /etc/pip.conf ]; then
+            echo "pip: existing pip.conf found — leaving it untouched"
+          else
+            echo "configuring pip index: $PIP_INDEX_URL_INPUT"
+            echo "PIP_INDEX_URL=$PIP_INDEX_URL_INPUT" >> "$GITHUB_ENV"
+            host="${PIP_INDEX_URL_INPUT#http://}"
+            host="${host#https://}"
+            host="${host%%/*}"
+            echo "PIP_TRUSTED_HOST=$host" >> "$GITHUB_ENV"
+          fi
+        fi
+
     - name: Install RecordLoop runtime (one package)
-      if: inputs.skip-runtime-install != 'true'
+      if: inputs.skip-runtime-install != 'true' && env.RECORDLOOP_HAS_RUNTIME != '1'
       shell: bash
       run: |
         python3 -m pip install --upgrade pip --quiet
@@ -122,19 +387,37 @@ runs:
         python3 -m pip install --quiet 'openai>=1.50.0' 'pyyaml>=6.0' 'httpx>=0.27.0'
 
     - name: Install Playwright + ffmpeg (only when we're going to record)
-      if: (inputs.preview-url != '' || inputs.auto-start != 'false') && inputs.skip-playwright-install != 'true'
+      if: (inputs.preview-url != '' || inputs.auto-start != 'false') && inputs.skip-playwright-install != 'true' && env.RECORDLOOP_HAS_PLAYWRIGHT != '1'
       shell: bash
       run: |
         python3 -m pip install --quiet 'playwright>=1.44.0'
         python3 -m playwright install --with-deps chromium
-        # ffmpeg lets ensure_mp4() convert Playwright's raw .webm output to
-        # .mp4 — smaller files, browser-friendly. ubuntu-latest usually has
-        # it but installing explicitly costs ~5s and removes the assumption.
+        # ffmpeg converts Playwright's .webm → .mp4, then .mp4 → .gif for
+        # inline GitHub comment rendering. Best-effort: if it can't be
+        # installed the recorder falls back to a .webm + text link in the
+        # PR comment. Never fail the job over ffmpeg.
         if ! command -v ffmpeg >/dev/null 2>&1; then
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ffmpeg
+          (
+            set +e
+            if command -v apt-get >/dev/null 2>&1; then
+              SUDO=""; [ "$(id -u)" != "0" ] && command -v sudo >/dev/null && SUDO="sudo"
+              $SUDO apt-get update -qq && $SUDO apt-get install -y --no-install-recommends ffmpeg
+            elif command -v dnf >/dev/null 2>&1; then
+              dnf install -y ffmpeg-free \
+                || (dnf install -y epel-release && dnf install -y ffmpeg-free) \
+                || dnf install -y ffmpeg \
+                || true
+            elif command -v yum >/dev/null 2>&1; then
+              yum install -y ffmpeg-free \
+                || (yum install -y epel-release && yum install -y ffmpeg-free) \
+                || yum install -y ffmpeg \
+                || true
+            else
+              echo "⚠ no package manager found — ffmpeg unavailable"
+            fi
+          ) || echo "⚠ ffmpeg install failed — recordings will be .webm + text link (no inline GIF)"
         fi
-        ffmpeg -version | head -1 || true
+        ffmpeg -version | head -1 || echo "ffmpeg unavailable — recordings will be .webm only"
 
     - name: Checkout user repo (for auto-start)
       if: inputs.preview-url == '' && inputs.auto-start != 'false'
@@ -155,6 +438,8 @@ runs:
       env:
         START_COMMAND: ${{ inputs.start-command }}
         START_PORT: ${{ inputs.start-port }}
+        STORYBOOK_CONFIG_DIR: ${{ inputs.storybook-config-dir }}
+        STORYBOOK_PORT: ${{ inputs.storybook-port }}
       run: |
         set -e
         cd __recordloop_target__
@@ -171,6 +456,92 @@ runs:
           npm install --no-audit --no-fund --loglevel=error
         fi
         echo "::endgroup::"
+
+        # ----------------------------------------------------------------
+        # Storybook auto-detection
+        # ----------------------------------------------------------------
+        # An explicit storybook-config-dir always wins (power-user override).
+        # Auto-detection is conservative: we only flip to Storybook when the
+        # repo CAN'T serve a main app — i.e. there's no "start" and no "dev"
+        # script in package.json. Hybrid repos (Next.js + Storybook for
+        # component dev) get their main app served by default; users who
+        # actually want Storybook on a hybrid set storybook-config-dir.
+        SB_DIR=""
+        SB_USE_SCRIPT=""
+        HAS_START_OR_DEV=0
+        if grep -qE '"(start|dev)"\s*:' package.json; then
+          HAS_START_OR_DEV=1
+        fi
+
+        if [ -n "$START_COMMAND" ]; then
+          echo "storybook: skipping — start-command is set"
+        elif [ "$STORYBOOK_CONFIG_DIR" = "false" ]; then
+          echo "storybook: opted out via storybook-config-dir=false"
+        elif [ -n "$STORYBOOK_CONFIG_DIR" ] && [ -d "$STORYBOOK_CONFIG_DIR" ]; then
+          SB_DIR="$STORYBOOK_CONFIG_DIR"
+          echo "storybook: using explicit config dir: $SB_DIR"
+        elif [ "$HAS_START_OR_DEV" -eq 1 ]; then
+          echo "storybook: auto-detection skipped (package.json has start/dev script — main app wins). Set storybook-config-dir to override."
+        else
+          MAIN_FILE="$(find . -path ./node_modules -prune -o \
+              -type f \
+              \( -path '*/.storybook/main.ts' \
+                 -o -path '*/.storybook/main.tsx' \
+                 -o -path '*/.storybook/main.js' \
+                 -o -path '*/.storybook/main.mjs' \
+                 -o -path '*/.storybook/main.cjs' \) \
+              -print 2>/dev/null | sort | head -1)"
+          if [ -n "$MAIN_FILE" ]; then
+            SB_DIR="$(dirname "$MAIN_FILE")"
+            echo "storybook: auto-detected config dir: $SB_DIR (from $MAIN_FILE)"
+          elif grep -q '"storybook"\s*:' package.json; then
+            SB_USE_SCRIPT="1"
+            echo "storybook: detected via package.json \"storybook\" script (no .storybook config dir found)"
+          fi
+        fi
+
+        if [ -n "$SB_DIR" ] || [ -n "$SB_USE_SCRIPT" ]; then
+          PORT="${STORYBOOK_PORT:-6006}"
+          echo "::group::Storybook build"
+          # `npx storybook build` is the v7+ canonical command. The
+          # output-dir is /tmp so the static bundle doesn't end up in
+          # the workspace tree (which artifact uploads might pick up).
+          if [ -n "$SB_DIR" ]; then
+            npx storybook build \
+              --config-dir "$SB_DIR" \
+              --output-dir /tmp/sb-static \
+              --quiet
+          else
+            # Script-only fallback: let storybook find its own config.
+            npx storybook build \
+              --output-dir /tmp/sb-static \
+              --quiet
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Serve Storybook static bundle on :$PORT"
+          nohup python3 -m http.server --directory /tmp/sb-static "$PORT" \
+            > /tmp/recordloop-app.log 2>&1 &
+          APP_PID=$!
+          echo "started static serve PID=$APP_PID"
+          # Wait for the iframe.html endpoint specifically — that's what
+          # the recorder navigates to. A bare `/` 200 is not enough.
+          for i in $(seq 1 30); do
+            if curl -sf "http://localhost:$PORT/iframe.html" >/dev/null 2>&1; then
+              echo "✓ storybook static serve up after ${i}s"
+              echo "RECORDLOOP_DETECTED_URL=http://localhost:$PORT" >> "$GITHUB_ENV"
+              echo "::endgroup::"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "✗ storybook static serve did not respond on :$PORT/iframe.html within 30s"
+          echo "--- last 40 lines of /tmp/recordloop-app.log ---"
+          tail -40 /tmp/recordloop-app.log || true
+          echo "::endgroup::"
+          # Don't fail the whole job — fall through to planned-flows mode.
+          exit 0
+        fi
 
         if grep -q '"build"\s*:' package.json; then
           echo "::group::Build"
@@ -200,7 +571,7 @@ runs:
         if [ -n "$START_PORT" ]; then
           PORTS="$START_PORT"
         else
-          PORTS="3000 3001 4173 5173 4321 8080"
+          PORTS="3000 3001 4173 5173 4321 6006 8080"
         fi
 
         echo "::group::Wait for app to come up"
@@ -228,6 +599,44 @@ runs:
 
         echo "RECORDLOOP_DETECTED_URL=$DETECTED" >> "$GITHUB_ENV"
 
+    - name: Validate login inputs
+      # Login is opt-in: any of login-username/password being set turns it on.
+      # The other inputs (URL, selectors, success-url) all have smart defaults
+      # in login_capture.py — we only enforce that *both* credentials are
+      # supplied as a pair so we don't half-fill a form.
+      if: inputs.login-username != '' || inputs.login-password != ''
+      shell: bash
+      env:
+        L_USER: ${{ inputs.login-username }}
+        L_PASS: ${{ inputs.login-password }}
+      run: |
+        if [ -z "$L_USER" ] || [ -z "$L_PASS" ]; then
+          echo "✗ login-username and login-password must be set together."
+          exit 1
+        fi
+
+    - name: Capture login storage state
+      # Login activates as soon as username + password are provided.
+      # Everything else (URL, selectors, success-url) has heuristic defaults.
+      if: inputs.login-username != '' && inputs.login-password != ''
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        RECORDLOOP_LOGIN_URL: ${{ inputs.login-url }}
+        RECORDLOOP_LOGIN_USERNAME: ${{ inputs.login-username }}
+        RECORDLOOP_LOGIN_PASSWORD: ${{ inputs.login-password }}
+        RECORDLOOP_LOGIN_USERNAME_SELECTOR: ${{ inputs.login-username-selector }}
+        RECORDLOOP_LOGIN_PASSWORD_SELECTOR: ${{ inputs.login-password-selector }}
+        RECORDLOOP_LOGIN_SUBMIT_SELECTOR: ${{ inputs.login-submit-selector }}
+        RECORDLOOP_LOGIN_SUCCESS_URL: ${{ inputs.login-success-url }}
+        # Used by login_capture.py to resolve relative login-url ("/login") against
+        # the real app origin. preview-url wins; otherwise the auto-started URL.
+        RECORDLOOP_BASE_URL: ${{ inputs.preview-url }}
+      run: |
+        export RECORDLOOP_BASE_URL="${RECORDLOOP_BASE_URL:-${RECORDLOOP_DETECTED_URL:-}}"
+        export PYTHONPATH="${ACTION_PATH}:${ACTION_PATH}/src:${PYTHONPATH:-}"
+        python3 "${ACTION_PATH}/api/login_capture.py"
+
     - name: Run RecordLoop analyzer
       id: runner
       shell: bash
@@ -247,7 +656,15 @@ runs:
         PREVIEW_URL: ${{ inputs.preview-url }}
         ACTION_PATH: ${{ github.action_path }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        RECORDLOOP_STORAGE_STATE: ${{ inputs.storage-state }}
+        # Storage-state precedence: explicit `storage-state` input wins; if not
+        # set, fall back to whatever the "Capture login storage state" step
+        # wrote into env via $GITHUB_ENV (named RECORDLOOP_STORAGE_STATE there
+        # too). Without this fallback the empty input would clobber it.
+        RECORDLOOP_STORAGE_STATE: ${{ inputs.storage-state != '' && inputs.storage-state || env.RECORDLOOP_STORAGE_STATE }}
+        # Threaded through so run_action.py can detect "login was configured
+        # but capture produced nothing" and fail fast (otherwise we'd silently
+        # record the login page).
+        RECORDLOOP_LOGIN_URL: ${{ inputs.login-url }}
         # Threaded into the PR comment so users can click straight to the
         # workflow run page where the video artifact is downloadable.
         WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -282,3 +699,8 @@ runs:
           /tmp/recordloop-videos/*.gif
         if-no-files-found: ignore
         retention-days: 14
+
+    - name: Clean up ~/.npmrc auth token
+      if: always() && inputs.npm-auth-token != ''
+      shell: bash
+      run: rm -f "$HOME/.npmrc"

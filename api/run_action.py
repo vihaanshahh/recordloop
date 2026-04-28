@@ -131,7 +131,11 @@ def _render_comment(flows, preview_url: str, recordings: list | None, cost=None)
         if after_gif:
             lines.append(f"![{_flow_title(f.name)}]({after_gif})")
         elif rec.get("video_url"):
-            lines.append(f"[▶ Watch recording]({rec['video_url']})")
+            url = rec["video_url"]
+            # <video> renders inline in GitHub markdown where allowed;
+            # the text link below it is the fallback if the tag is stripped.
+            lines.append(f'<video src="{url}" controls width="720"></video>')
+            lines.append(f"[▶ Watch recording]({url})")
         elif rec.get("video"):
             has_video_without_url = True
 
@@ -255,6 +259,20 @@ async def main() -> int:
         # record a login page, which is useless.  Fail fast.
         print(f"RecordLoop: storage state error — {e}", file=sys.stderr)
         traceback.print_exc()
+        return 1
+
+    # If credentialed login was configured (RECORDLOOP_LOGIN_URL is set, which
+    # happens when the action's "Capture login storage state" step ran), but
+    # we still don't have a storage_state, the capture step silently produced
+    # no state. Recording the public site (or a login page) would be useless,
+    # so fail loudly.
+    if not storage_state and _env("RECORDLOOP_LOGIN_URL"):
+        print(
+            "RecordLoop: login was configured (RECORDLOOP_LOGIN_URL is set) "
+            "but no storage state was captured. Check the 'Capture login "
+            "storage state' step output for the actual failure.",
+            file=sys.stderr,
+        )
         return 1
 
     # 2. Run the agent loop
