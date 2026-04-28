@@ -90,8 +90,8 @@ def _record_one(
                     page.wait_for_load_state("load", timeout=5000)
                 except Exception:
                     pass
-            # Brief settle so the first frame isn't mid-paint.
-            time.sleep(0.5)
+            # Wait for the initial page load to settle.
+            time.sleep(0.3)
 
             for i, step in enumerate(flow.steps):
                 is_assertion = step.is_assertion
@@ -103,8 +103,7 @@ def _record_one(
                 # The agent almost always emits navigate as the first step
                 # even though we're already on that page from start_recording.
                 # Skip the redundant initial navigate so the recording doesn't
-                # double-load and so we don't fight Playwright's relative-URL
-                # handling.
+                # double-load.
                 if i == 0 and step.action.lower() == "navigate":
                     result["interactions_done"] += 1
                     continue
@@ -115,16 +114,6 @@ def _record_one(
                         result["assertions_passed"] += 1
                     else:
                         result["interactions_done"] += 1
-                    # Pause long enough that each interaction is visible and
-                    # any triggered animations (scroll-reveal, hover states)
-                    # have time to play out before the next step.
-                    action_lower = step.action.lower()
-                    if action_lower == "scroll":
-                        time.sleep(1.2)  # let scroll-reveal animations play
-                    elif action_lower == "navigate":
-                        time.sleep(0.8)
-                    else:
-                        time.sleep(0.4)
                 except Exception as e:
                     reason = str(e).splitlines()[0][:200]
                     print(f"[cloud-recorder] {step.action} {step.selector!r} failed: {reason}")
@@ -142,7 +131,7 @@ def _record_one(
                         })
 
             # Hold on the final state so viewers can read it.
-            time.sleep(1.5)
+            time.sleep(1.0)
 
             recorder.stop_recording()
 
@@ -242,15 +231,27 @@ def _execute(page, recorder, step: InteractionStep, preview_url: str = ""):
             recorder.record_action(ActionType.HOVER, key=_to_key(sel))
 
         case "scroll":
-            # Scroll a specific element into view, or fall back to scrolling
-            # to the bottom of the page when selector is empty/generic.
+            # Scroll a specific element into view, or scroll to the bottom.
+            # Use instant positioning — smooth scroll is async in the browser
+            # and Playwright can't know when it finishes.
             if sel and sel.lower() not in ("body", "html", "window", "page", "bottom"):
                 page.locator(sel).scroll_into_view_if_needed(timeout=8000)
             else:
-                page.evaluate(
-                    "window.scrollTo({top: document.body.scrollHeight, behavior: 'smooth'})"
-                )
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             recorder.record_action(ActionType.SCROLL, value=step.selector)
+
+        case "wait":
+            # Explicit pause emitted by the agent when it needs animations
+            # to settle. Value is seconds (float); selector is optional element
+            # to wait for visibility. Default: 1s.
+            duration = float(val or 1.0)
+            if sel:
+                try:
+                    page.wait_for_selector(sel, state="visible", timeout=int(duration * 1000 + 5000))
+                except Exception:
+                    pass
+            time.sleep(duration)
+            recorder.record_action(ActionType.WAIT, key=_to_key(sel) if sel else None)
 
         # -------- assertions --------------------------------------------------
         # These raise on failure (caught by the loop in _record_one) and the
