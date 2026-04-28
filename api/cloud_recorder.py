@@ -257,7 +257,9 @@ def _execute(page, recorder, step: InteractionStep, preview_url: str = ""):
         # actions, so they shouldn't appear in the SemanticKey trail.
 
         case "assert_text":
-            actual = (page.text_content(sel, timeout=8000) or "").strip()
+            loc = page.locator(sel)
+            loc.scroll_into_view_if_needed(timeout=8000)
+            actual = (loc.text_content() or "").strip()
             expected = (val or "").strip()
             if not expected:
                 raise AssertionError("assert_text requires a non-empty value")
@@ -267,7 +269,6 @@ def _execute(page, recorder, step: InteractionStep, preview_url: str = ""):
                 )
 
         case "assert_attribute":
-            # value format: "attr_name=expected_substring"
             raw = val or ""
             if "=" not in raw:
                 raise AssertionError(
@@ -276,8 +277,9 @@ def _execute(page, recorder, step: InteractionStep, preview_url: str = ""):
             attr, _, expected = raw.partition("=")
             attr = attr.strip()
             expected = expected.strip()
-            page.wait_for_selector(sel, timeout=8000)
-            actual = page.get_attribute(sel, attr)
+            loc = page.locator(sel)
+            loc.scroll_into_view_if_needed(timeout=8000)
+            actual = loc.get_attribute(attr)
             if actual is None:
                 raise AssertionError(f"attribute {attr!r} not present on {sel!r}")
             if expected not in actual:
@@ -296,7 +298,9 @@ def _execute(page, recorder, step: InteractionStep, preview_url: str = ""):
                 )
 
         case "assert_visible":
-            page.wait_for_selector(sel, state="visible", timeout=8000)
+            loc = page.locator(sel)
+            loc.scroll_into_view_if_needed(timeout=8000)
+            loc.wait_for(state="visible", timeout=8000)
 
         case _:
             raise ValueError(f"unknown action {step.action!r}")
