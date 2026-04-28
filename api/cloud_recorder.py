@@ -90,10 +90,8 @@ def _record_one(
                     page.wait_for_load_state("load", timeout=5000)
                 except Exception:
                     pass
-            # Let page animations settle before the first action.
-            # framer-motion fadeUp transitions are 0.7s — wait long enough
-            # for the initial paint to complete.
-            time.sleep(1.2)
+            # Brief settle so the first frame isn't mid-paint.
+            time.sleep(0.5)
 
             for i, step in enumerate(flow.steps):
                 is_assertion = step.is_assertion
@@ -121,10 +119,12 @@ def _record_one(
                     # any triggered animations (scroll-reveal, hover states)
                     # have time to play out before the next step.
                     action_lower = step.action.lower()
-                    if action_lower in ("scroll", "navigate"):
-                        time.sleep(1.5)  # scroll-reveal animations need ~1s
-                    else:
+                    if action_lower == "scroll":
+                        time.sleep(1.2)  # let scroll-reveal animations play
+                    elif action_lower == "navigate":
                         time.sleep(0.8)
+                    else:
+                        time.sleep(0.4)
                 except Exception as e:
                     reason = str(e).splitlines()[0][:200]
                     print(f"[cloud-recorder] {step.action} {step.selector!r} failed: {reason}")
@@ -141,8 +141,8 @@ def _record_one(
                             "reason": reason,
                         })
 
-            # Hold on the final state long enough that viewers can read it.
-            time.sleep(2.5)
+            # Hold on the final state so viewers can read it.
+            time.sleep(1.5)
 
             recorder.stop_recording()
 
@@ -240,6 +240,17 @@ def _execute(page, recorder, step: InteractionStep, preview_url: str = ""):
         case "hover":
             page.hover(sel, timeout=8000)
             recorder.record_action(ActionType.HOVER, key=_to_key(sel))
+
+        case "scroll":
+            # Scroll a specific element into view, or fall back to scrolling
+            # to the bottom of the page when selector is empty/generic.
+            if sel and sel.lower() not in ("body", "html", "window", "page", "bottom"):
+                page.locator(sel).scroll_into_view_if_needed(timeout=8000)
+            else:
+                page.evaluate(
+                    "window.scrollTo({top: document.body.scrollHeight, behavior: 'smooth'})"
+                )
+            recorder.record_action(ActionType.SCROLL, value=step.selector)
 
         # -------- assertions --------------------------------------------------
         # These raise on failure (caught by the loop in _record_one) and the
