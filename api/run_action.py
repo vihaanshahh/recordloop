@@ -73,9 +73,10 @@ def _format_cost_footer(cost) -> str:
     in_t = int(getattr(cost, "input_tokens", 0) or 0)
     out_t = int(getattr(cost, "output_tokens", 0) or 0)
     usd = float(getattr(cost, "usd", 0.0) or 0.0)
-    if in_t == 0 and out_t == 0:
+    is_dry_run = model == "(dry-run)"
+    # Suppress only when there's genuinely no usage and it's not a dry-run.
+    if in_t == 0 and out_t == 0 and not is_dry_run:
         return ""
-
     def _fmt_tokens(n: int) -> str:
         if n >= 1_000_000:
             return f"{n / 1_000_000:.1f}M"

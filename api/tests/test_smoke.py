@@ -741,11 +741,20 @@ def test_format_cost_footer_with_real_usage():
 
 
 def test_format_cost_footer_skips_when_no_tokens():
-    """If the run never made an LLM call, we MUST NOT print a misleading
-    `$0` footer — return empty so the comment looks normal."""
+    """Non-dry-run with 0 tokens means no LLM call was made — skip footer."""
     c = CostInfo(provider="openai", model="gpt-4o-mini")
     c.finalize()
     assert _format_cost_footer(c) == ""
+
+
+def test_format_cost_footer_shows_on_dry_run():
+    """Dry-run should show the footer even with 0 tokens so the user can
+    confirm the dry-run path fired correctly."""
+    c = CostInfo(provider="openai", model="(dry-run)")
+    c.finalize()
+    footer = _format_cost_footer(c)
+    assert "(dry-run)" in footer
+    assert "$0" in footer
 
 
 def test_format_cost_footer_handles_none():
