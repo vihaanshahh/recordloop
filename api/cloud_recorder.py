@@ -90,8 +90,10 @@ def _record_one(
                     page.wait_for_load_state("load", timeout=5000)
                 except Exception:
                     pass
-            # Brief settle so the first frame isn't mid-paint.
-            time.sleep(0.4)
+            # Let page animations settle before the first action.
+            # framer-motion fadeUp transitions are 0.7s — wait long enough
+            # for the initial paint to complete.
+            time.sleep(1.2)
 
             for i, step in enumerate(flow.steps):
                 is_assertion = step.is_assertion
@@ -115,9 +117,14 @@ def _record_one(
                         result["assertions_passed"] += 1
                     else:
                         result["interactions_done"] += 1
-                    # Short, even pacing between steps so motion stays
-                    # smooth in the GIF without feeling rushed.
-                    time.sleep(0.35)
+                    # Pause long enough that each interaction is visible and
+                    # any triggered animations (scroll-reveal, hover states)
+                    # have time to play out before the next step.
+                    action_lower = step.action.lower()
+                    if action_lower in ("scroll", "navigate"):
+                        time.sleep(1.5)  # scroll-reveal animations need ~1s
+                    else:
+                        time.sleep(0.8)
                 except Exception as e:
                     reason = str(e).splitlines()[0][:200]
                     print(f"[cloud-recorder] {step.action} {step.selector!r} failed: {reason}")
@@ -134,8 +141,8 @@ def _record_one(
                             "reason": reason,
                         })
 
-            # Hold the final frame for a beat so viewers see the end state.
-            time.sleep(0.6)
+            # Hold on the final state long enough that viewers can read it.
+            time.sleep(2.5)
 
             recorder.stop_recording()
 
@@ -314,7 +321,7 @@ def _make_preview_gif(mp4_path: Path, label: str = "after") -> Optional[Path]:
         result = subprocess.run(
             [
                 "ffmpeg", "-y",
-                "-t", "15",
+                "-t", "20",
                 "-i", str(mp4_path),
                 "-vf", (
                     "fps=15,"
