@@ -219,10 +219,6 @@ def _execute(page, recorder, step: InteractionStep, preview_url: str = ""):
             page.select_option(sel, val or "", timeout=8000)
             recorder.record_action(ActionType.SELECT, key=_to_key(sel), value=val)
 
-        case "wait":
-            page.wait_for_selector(sel, timeout=8000)
-            recorder.record_action(ActionType.WAIT, key=_to_key(sel))
-
         case "hover":
             page.hover(sel, timeout=8000)
             recorder.record_action(ActionType.HOVER, key=_to_key(sel))
