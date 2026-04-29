@@ -128,11 +128,17 @@ def _render_comment(flows, preview_url: str, recordings: list | None, cost=None)
             lines.append(f.change_context)
         lines.append("")
 
-        if rec.get("video_url"):
-            url = rec["video_url"]
-            lines.append(f'<video src="{url}" controls width="720"></video>')
-            lines.append(f"[▶ Watch recording]({url})")
-        elif rec.get("video"):
+        # Inline rendering: GitHub strips <video> tags from arbitrary CDNs
+        # but renders animated GIFs via <img>. The slideshow GIF gives the
+        # reviewer pixels-in-comment; the .webm link below is for reviewers
+        # who want smooth motion.
+        gif_url = rec.get("gif_url")
+        video_url = rec.get("video_url")
+        if gif_url:
+            lines.append(f"![{_flow_title(f.name)}]({gif_url})")
+        if video_url:
+            lines.append(f"[▶ Watch full recording]({video_url})")
+        if not gif_url and not video_url and (rec.get("gif") or rec.get("video")):
             has_video_without_url = True
 
         lines.append("")
@@ -322,12 +328,15 @@ async def main() -> int:
         except Exception as e:
             print(f"RecordLoop: recording skipped — {e}", file=sys.stderr)
 
-    # 3b. Upload the GIF (and MP4 fallback link) to GitHub releases for inline display
+    # 3b. Upload the GIF (inline preview) and .webm (full recording) to
+    # GitHub releases. The GIF is what reviewers actually see in the
+    # comment; the .webm is the click-through "Watch full recording".
     if recordings:
         upload_tasks: list = []
         upload_meta: list = []  # (rec_dict, url_key_to_set)
         for r in recordings:
             for path_key, url_key in [
+                ("gif", "gif_url"),
                 ("video", "video_url"),
             ]:
                 path = r.get(path_key)

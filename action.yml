@@ -277,13 +277,14 @@ runs:
             echo "RECORDLOOP_HAS_RUNTIME=1" >> "$GITHUB_ENV"
           fi
 
-          if python3 -c "import playwright" 2>/dev/null; then
+          if python3 -c "import playwright, PIL" 2>/dev/null; then
             # Playwright caches Chromium under ~/.cache/ms-playwright by default.
-            # If the module is importable AND any chromium dir exists, treat
-            # Playwright as fully installed.
+            # If the module is importable AND any chromium dir exists AND
+            # Pillow is present (needed for inline-GIF generation), treat
+            # the recording stack as fully installed.
             CACHE_DIR="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
             if ls -d "$CACHE_DIR"/chromium* >/dev/null 2>&1; then
-              echo "✓ playwright + chromium present — will skip playwright install"
+              echo "✓ playwright + chromium + pillow present — will skip playwright install"
               echo "RECORDLOOP_HAS_PLAYWRIGHT=1" >> "$GITHUB_ENV"
             fi
           fi
@@ -374,7 +375,9 @@ runs:
       if: (inputs.preview-url != '' || inputs.auto-start != 'false') && inputs.skip-playwright-install != 'true' && env.RECORDLOOP_HAS_PLAYWRIGHT != '1'
       shell: bash
       run: |
-        python3 -m pip install --quiet 'playwright>=1.44.0'
+        # Pillow stitches per-step screenshots into the slideshow GIF that
+        # GitHub renders inline (no ffmpeg, no system binaries needed).
+        python3 -m pip install --quiet 'playwright>=1.44.0' 'Pillow>=10.0'
         python3 -m playwright install --with-deps chromium
 
     - name: Checkout user repo (for auto-start)

@@ -63,6 +63,11 @@ def _record_one(
         "status": "recording",
         "video": None,
         "video_url": None,
+        # GitHub strips <video> tags from arbitrary CDNs but renders animated
+        # GIFs inline via <img>. We build a step-by-step slideshow GIF from
+        # page screenshots so reviewers see the flow without leaving the PR.
+        "gif": None,
+        "gif_url": None,
         # Assertion outcomes — used by run_action.py to render pass/fail.
         "assertions_total": 0,
         "assertions_passed": 0,
@@ -72,6 +77,15 @@ def _record_one(
         "interactions_done": 0,
         "interaction_failures": [],
     }
+
+    frames_png: list[bytes] = []
+
+    def snap():
+        """Best-effort screenshot for the slideshow GIF. Never raises."""
+        try:
+            frames_png.append(page.screenshot(type="png", full_page=False))
+        except Exception:
+            pass
 
     try:
         with PlaywrightRecorder(config) as recorder:
@@ -92,6 +106,7 @@ def _record_one(
                     pass
             # Wait for the initial page load to settle.
             time.sleep(0.3)
+            snap()  # opening frame of the slideshow
 
             for i, step in enumerate(flow.steps):
                 is_assertion = step.is_assertion
@@ -130,14 +145,29 @@ def _record_one(
                             "reason": reason,
                         })
 
+                # Snapshot after each step (success OR failure) — reviewers
+                # benefit from seeing the state when an assertion failed too.
+                snap()
+
             # Hold on the final state so viewers can read it.
             time.sleep(1.0)
+            snap()  # closing frame
 
             recorder.stop_recording()
 
             video_path = recorder.get_video_path()
             if video_path:
                 result["video"] = str(video_path)
+
+            # Build the slideshow GIF. Failures here are non-fatal — the
+            # .webm link still works, the reviewer just loses inline preview.
+            try:
+                from api.gif_builder import build_gif
+                gif_path = Path(VIDEO_DIR) / f"{flow.name}-{label}.gif"
+                if build_gif(frames_png, gif_path):
+                    result["gif"] = str(gif_path)
+            except Exception as e:
+                print(f"[cloud-recorder] GIF build failed: {e}")
 
             # A flow passes only if every assertion passed AND we recorded
             # at least one assertion. A no-assertion flow is degraded to
