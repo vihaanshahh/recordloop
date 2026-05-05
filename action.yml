@@ -1,5 +1,5 @@
 name: 'RecordLoop'
-description: 'AI-driven UI test recordings on every PR. Reads the diff, generates flows, replays with Playwright, posts a video comment.'
+description: 'AI-driven UI test recordings on every PR. Reads the diff, generates a flow, replays with Playwright, posts a GIF/video PR comment.'
 author: 'vihaanshahh'
 branding:
   icon: 'video'
@@ -642,7 +642,7 @@ runs:
         # record the login page).
         RECORDLOOP_LOGIN_URL: ${{ inputs.login-url }}
         # Threaded into the PR comment so users can click straight to the
-        # workflow run page where the video artifact is downloadable.
+        # workflow run page where recording artifacts are downloadable.
         WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
         if [ -z "${{ github.event.pull_request.number }}" ]; then
@@ -657,14 +657,14 @@ runs:
         # pre-installed Python in their corporate container image.
         python3 "${ACTION_PATH}/api/run_action.py"
 
-    - name: List recorded video files (debug)
+    - name: List recording files (debug)
       if: always() && (inputs.preview-url != '' || inputs.auto-start != 'false')
       shell: bash
       run: |
         echo "--- /tmp/recordloop-videos/ ---"
         ls -la /tmp/recordloop-videos/ 2>/dev/null || echo "(directory does not exist)"
 
-    - name: Upload recorded videos as workflow artifact
+    - name: Upload recordings as workflow artifact
       if: always() && (inputs.preview-url != '' || inputs.auto-start != 'false')
       uses: actions/upload-artifact@v4
       with:

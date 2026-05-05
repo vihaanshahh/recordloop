@@ -104,10 +104,11 @@ async def upsert_pr_comment(
 
 
 async def upload_pr_video(repo: str, pr_number: int, file_path: str, token: str) -> Optional[str]:
-    """Upload a video as a GitHub release asset and return its browser_download_url.
+    """Upload a recording asset and return its browser_download_url.
 
     Uses the official releases API (works with GITHUB_TOKEN + contents:write).
-    Videos are stored under a pre-release tagged 'recordloop-recordings'.
+    GIF/video assets are stored under a pre-release tagged
+    'recordloop-recordings'.
     """
     import mimetypes
     import os
@@ -261,5 +262,4 @@ async def _patch(url: str, token: str, data: dict) -> dict:
             return json.loads(resp.read())
 
     return await asyncio.to_thread(_do)
-
 

@@ -3,12 +3,13 @@ RecordLoop GitHub Action entry point.
 
 Single-file runner the action.yml composite invokes. Reads everything from
 env vars (the standard GitHub Actions contract), runs the analyzer agent
-loop against the PR diff, optionally records videos with Playwright if a
-preview URL is set, and posts a PR comment with the result.
+loop against the PR diff, optionally records GIF/video artifacts with
+Playwright if a preview URL is set, and posts a PR comment with the result.
 
-Dependencies: only ``openai`` (analyzer) and Python stdlib (github_client).
+Dependencies: runtime installs ``openai``, ``pyyaml``, and ``httpx``;
+Playwright and Pillow are installed only when recording is enabled.
 Playwright is imported lazily inside cloud_recorder and only loaded when
-PREVIEW_URL is non-empty.
+a preview URL is available.
 
 Env vars consumed:
     OPENAI_API_KEY        — required when PROVIDER=openai

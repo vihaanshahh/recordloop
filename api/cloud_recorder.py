@@ -2,7 +2,8 @@
 Cloud Playwright runner.
 
 Takes AI-generated InteractionFlows and records each one against a live
-preview URL. Returns video paths (and optionally S3 URLs).
+preview URL. Returns per-viewport GIF and video paths for upload by the
+GitHub Action or hosted API.
 """
 
 import re

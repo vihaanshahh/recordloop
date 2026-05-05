@@ -2,7 +2,7 @@
 RecordLoop Cloud API  —  api.recordloop.dev
 
 POST /trigger   → analyze PR + record → post comment
-GET  /jobs/{id} → check job status
+GET  /jobs/{job_id} → check job status
 GET  /health    → liveness check
 """
 

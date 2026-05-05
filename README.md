@@ -48,7 +48,7 @@ on:
     types: [opened, synchronize, reopened]
 permissions:
   pull-requests: write   # to post & edit the PR comment in place
-  contents: write        # to upload the GIF as a release asset on your repo
+  contents: write        # to upload recording assets on your repo
 jobs:
   recordloop:
     runs-on: ubuntu-latest
@@ -63,7 +63,7 @@ That's the entire install. No `pip`, no `npm`, no bridge server.
 
 **About the permissions:**
 - `pull-requests: write` — to post and edit the PR comment.
-- `contents: write` — to create a hidden pre-release named `recordloop-recordings` in your own repo and upload the recorded GIF as an asset there. Inline-rendering GIFs in markdown comments requires the file to live somewhere addressable; release assets are the cheapest GitHub-native answer. We never write to your code, branches, or tags.
+- `contents: write` — to create a hidden pre-release named `recordloop-recordings` in your own repo and upload the recorded GIF/video assets there. Inline-rendering GIFs in markdown comments requires the GIF to live somewhere addressable; release assets are the cheapest GitHub-native answer. We never write to your code, branches, or tags.
 
 **About the `if:` guard:** by default this disables RecordLoop on PRs from forks, so untrusted contributors can't trigger runs against your OpenAI key. If you maintain an open-source project and need RecordLoop on contributor PRs, see [the OSS workflow](#oss-maintainers-fork-prs-with-a-label-gate) below — it uses the standard `pull_request_target` + label-gated pattern.
 
@@ -75,7 +75,7 @@ gh secret set OPENAI_API_KEY
 
 Or via Settings → Secrets and variables → Actions. Azure OpenAI works too — see [provider configuration](#provider-configuration) below.
 
-### 3. Open a PR — get a video comment
+### 3. Open a PR — get a recording comment
 
 On every PR, the action will:
 
@@ -83,8 +83,8 @@ On every PR, the action will:
 2. Hand the diff to an agent loop with `read_diff` / `read_file` / `list_files` / `submit_flows` tools
 3. Generate one short Playwright flow targeted at the changed lines
 4. Auto-start your app on the runner (or use a `preview-url` you provide)
-5. Replay the flow with Playwright at the selected viewport(s), record MP4 + GIF
-6. Upload the GIF(s) to a `recordloop-recordings` release in your repo
+5. Replay the flow with Playwright at the selected viewport(s), capture a screenshot GIF plus full browser video
+6. Upload the GIF/video assets to a `recordloop-recordings` release in your repo
 7. Post a PR comment with the GIF(s) rendered inline
 
 ## OSS maintainers: fork PRs with a label gate
@@ -291,7 +291,7 @@ your main app instead.
 ## Corporate / self-hosted runners
 
 For runs on a bare RHEL/Alpine container, behind an Artifactory mirror, with
-no `git`/`node`/`ffmpeg` pre-installed:
+no `git`/`node` pre-installed:
 
 ```yaml
 runs-on: [self-hosted, linux]
@@ -312,9 +312,9 @@ steps:
 ```
 
 The action probes the container on every run and only installs what's
-missing — `git` / `node 20` / `npm` / `curl` / `ffmpeg` / `python3`. On
-Ubuntu runners this is a no-op. If `python3` / `playwright` / `chromium`
-are pre-baked into your image, the action skips those steps automatically.
+missing: `git`, `node 20`, `npm`, `curl`, and `python3`. On Ubuntu runners
+this is a no-op. If `python3`, Playwright, Chromium, and Pillow are pre-baked
+into your image, the action skips those steps automatically.
 The `~/.npmrc` it writes is `chmod 600` and removed at end of run.
 
 ## Advanced
@@ -343,7 +343,11 @@ logic is wrong for your environment.
 
 The agent sees a token-budgeted overview of every changed file in the PR and uses tools to drill into whichever ones look load-bearing. It generates exactly one short flow (2–5 steps) whose every step targets the changed region — no wandering through unchanged UI.
 
-A Playwright worker on the runner replays the flow, ffmpeg converts the MP4 to a 15 fps palette-optimised GIF, and the action uploads it to a `recordloop-recordings` pre-release in your repo. The GIF renders inline in the PR comment for each selected viewport.
+A Playwright worker on the runner replays the flow at each selected viewport.
+RecordLoop snapshots the page after load and after every step, stitches those
+frames into a compact inline GIF with Pillow, and uploads both the GIF and the
+full Playwright browser video to a `recordloop-recordings` pre-release in your
+repo.
 
 ## What the agent guarantees
 
@@ -375,7 +379,7 @@ When an assertion fails, the failure reason appears at the top of the PR comment
 
 ## Self-hosted runners
 
-RecordLoop is a composite GitHub Action — point it at a self-hosted runner via `runs-on: [self-hosted, linux]` and the action installs its own Playwright + ffmpeg dependencies on first run, then re-uses the cached layer on subsequent jobs. Your OpenAI key stays in your own secret store, network egress is whatever the runner allows, and recordings stay inside your GitHub org.
+RecordLoop is a composite GitHub Action — point it at a self-hosted runner via `runs-on: [self-hosted, linux]` and the action installs its own Playwright + Pillow dependencies on first run, then re-uses the cached layer on subsequent jobs. Your OpenAI key stays in your own secret store, network egress is whatever the runner allows, and recordings stay inside your GitHub org.
 
 ## Cost
 

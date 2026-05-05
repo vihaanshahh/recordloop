@@ -1,152 +1,296 @@
 # AGENTS.md
 
-> **Audience**: AI coding agents (Claude Code, Cursor, Cline, Aider, Codex, Windsurf, …) joining this repo cold. Read this **before** making changes. It is a contract, not a tutorial.
+> Audience: AI coding agents joining this repo cold. Read this before making
+> changes. It is a contract for preserving the current architecture.
 
-## TL;DR — what this project is
+## What RecordLoop Is
 
-RecordLoop turns a GitHub PR diff into recorded Playwright sessions. An AI agent reads the changed UI files, generates realistic interaction flows, a headless browser replays them, and the resulting MP4 is uploaded to S3 and linked in a PR comment. **The AI step is itself an agent loop with tool calls** — see `api/analyzer.py`.
+RecordLoop turns a GitHub PR diff into a short, recorded browser verification:
 
+```text
+PR opened
+  -> fetch changed files
+  -> analyzer agent loop reads only the PR diff/files
+  -> submit exactly one focused Playwright flow
+  -> replay that flow at selected viewport(s)
+  -> build screenshot-based GIF previews + upload release assets
+  -> update one PR comment with pass/fail, GIFs, and trace details
 ```
-PR opened ─► fetch diff ─► agent loop (LLM + read_file/read_diff/list_files/submit_flows)
-         ─► Playwright replay ─► S3 upload ─► PR comment with video link
-```
 
-Three components, one repo:
-1. **`api/`** — FastAPI service that runs the analyzer + cloud recorder. **Most recent work lives here.**
-2. **`src/recordloop/`** — Python library with the local CLI, Playwright recorder, and session model.
-3. **`js/`** — Browser SDK (React/Vue/vanilla bindings) that captures user interactions in a dev environment.
+The AI step is itself an agent loop in `api/analyzer.py`. Do not replace it
+with a single prompt call. The recorder step is in `api/cloud_recorder.py`.
+The GitHub Action runner is `api/run_action.py` plus `action.yml`.
 
----
+## Current Architecture
 
-## Architecture map (where to look for what)
-
-| Path | Purpose | Read this if you're touching… |
+| Path | Purpose | Touch when |
 |---|---|---|
-| `api/analyzer.py` | **The agent loop.** Builds a `_FileIndex` from PR files, hands the LLM tools (`read_file`, `read_diff`, `list_files`, `submit_flows`), runs a bounded iteration loop. | LLM behavior, tool schemas, cost caps, file filter, prompt engineering |
-| `api/main.py` | FastAPI app. `/health`, `/trigger`, `/jobs/{job_id}`. Background-task runner that calls `analyze_pr` then `record_flows`. | HTTP surface, request routing, API key gating |
-| `api/models.py` | Pydantic request/response models. `TriggerRequest` carries a nested `LLMConfig` with optional `AzureConfig`. | Request schema, provider config |
-| `api/cloud_recorder.py` | Bridges LLM output to Playwright. Converts CSS-ish selectors to `SemanticKey` for the recorder. **Lazy-imports playwright** so Tier-1 tests don't need it. | Recording, selector conversion, video output |
-| `api/github_client.py` | `get_pr_files`, `post_pr_comment`. Hits the GitHub REST API. | GitHub integration |
-| `api/tests/test_smoke.py` | 55 tests covering everything in `api/`. Runs in <1s with zero secrets. **The verification gate.** | Anything in `api/` |
-| `api/README.md` | Human-facing API docs (curl examples, schema tables, CI snippet) | Documentation only |
-| `src/recordloop/capture/recorder.py` | `PlaywrightRecorder` + `RecorderConfig`. Used by `cloud_recorder.py`. | Local recording, video file format |
-| `src/recordloop/core/session.py` | `Action`, `ActionType`, `SemanticKey`, `Session`. The session model. | Action types, selector strategies |
-| `.github/workflows/recordloop-api-smoke.yml` | Tier-1 zero-secret CI job for the API. | CI |
-| `js/`, `src/recordloop/cli/`, `src/recordloop/bridge/` | Browser SDK, local CLI, bridge server. | Out of scope for agent-loop work |
+| `api/analyzer.py` | LLM agent loop, file filter, tool schemas, provider routing, cost tracking. | Changing LLM behavior, providers, tools, prompt, file filtering. |
+| `api/cloud_recorder.py` | Replays generated flows with Playwright, viewport matrix, assertions, screenshot GIF capture, selector normalization. | Recording behavior, viewport profiles, action execution, assertions, GIF/video result shape. |
+| `api/gif_builder.py` | Builds inline PR GIFs from per-step screenshots with Pillow. | GIF size, frame timing, image encoding. |
+| `api/run_action.py` | GitHub Action entry point: env parsing, analyzer call, recorder call, upload release assets, render PR comment. | Action runtime behavior, PR comment format, upload flow, output variables. |
+| `action.yml` | Composite GitHub Action inputs/steps. | Adding/removing action inputs or runtime install behavior. |
+| `api/main.py` | FastAPI service: `/health`, `/trigger`, `/jobs/{job_id}` and background job orchestration. | Hosted API routes, job status, API request handling. |
+| `api/models.py` | Pydantic API request/response models (`LLMConfig`, `RecordingConfig`, etc.). | Hosted API schema changes. |
+| `api/github_client.py` | GitHub REST helpers for PR files, comments, release asset uploads. | GitHub API behavior. |
+| `api/login.py`, `api/login_capture.py` | Storage-state auth support. | Login/session behavior. |
+| `api/repo_context.py` | `.github/recordloop.md` parsing and ignore-path matching. | Repo-local configuration. |
+| `api/tests/test_smoke.py` | Tier-1 verification for API/analyzer/action helpers. Zero secrets, no browser. | Any change in `api/`, `action.yml`, or docs-sensitive behavior. |
+| `src/recordloop/capture/recorder.py` | Lower-level `PlaywrightRecorder` and `RecorderConfig`. | Browser context options, viewport/mobile flags, session metadata. |
+| `src/recordloop/core/session.py` | `Action`, `ActionType`, `SemanticKey`, `Session`. | New action types or selector strategies. |
+| `README.md` | Public GitHub Action docs. | User-facing action inputs, install, architecture. |
+| `api/README.md` | Hosted API docs. | `/trigger` schema, API examples, local server docs. |
 
----
+## Non-Negotiable Invariants
 
-## Invariants — DO NOT BREAK THESE
+1. Keep `analyze_pr()` backwards-compatible.
 
-These are not stylistic preferences. Each one was added in response to a real failure mode. Read **why** before changing **what**.
+   Positional callers still pass through `api/main.py` and `api/run_action.py`.
+   Add new analyzer parameters only as keyword-only defaults.
 
-### 1. `analyze_pr()` signature must stay backwards-compatible
-Callers in `api/main.py:_run_job` pass positional args. The internal architecture has been rewritten twice (single-shot → agentic) without changing the signature. **Keep it that way.** If you need new params, add them as keyword-only with defaults.
+   ```python
+   def analyze_pr(
+       changed_files: list[dict],
+       preview_url: str,
+       provider: str = "openai",
+       api_key: Optional[str] = None,
+       model: Optional[str] = None,
+       azure_endpoint: Optional[str] = None,
+       azure_deployment: Optional[str] = None,
+       azure_api_version: Optional[str] = None,
+       *,
+       repo_context_body: str = "",
+       ignore_paths: Optional[list[str]] = None,
+       anthropic_base_url: Optional[str] = None,
+       anthropic_api_version: Optional[str] = None,
+   ) -> AnalyzeResult: ...
+   ```
 
-```python
-def analyze_pr(
-    changed_files: list[dict],
-    preview_url: str,
-    provider: str = "openai",
-    api_key: Optional[str] = None,
-    model: Optional[str] = None,
-    azure_endpoint: Optional[str] = None,
-    azure_deployment: Optional[str] = None,
-    azure_api_version: Optional[str] = None,
-) -> list[InteractionFlow]: ...
+2. `RECORDLOOP_DRY_RUN=1` must skip the LLM entirely.
+
+   Dry-run belongs near the top of `analyze_pr()` after lightweight filters.
+   It must not build an LLM client, call a provider, fetch network resources,
+   import Playwright, or require secrets.
+
+3. Keep the cost caps unless adding an explicit budget/quota mechanism.
+
+   Current constants in `api/analyzer.py`:
+
+   ```python
+   MAX_ITERATIONS = 10
+   MAX_FILES_READ = 30
+   MAX_TOTAL_INPUT_TOKENS = 50_000
+   MAX_OUTPUT_TOKENS_PER_TURN = 2048
+   ```
+
+4. Playwright must stay lazy-imported.
+
+   `api.main` must import successfully without Playwright installed. Keep
+   `from recordloop.capture.recorder import ...` inside `_record_one()` and
+   `from recordloop.core.session import ...` inside execution/selector helpers.
+
+5. Tests, specs, and stories are intentionally kept.
+
+   `_is_component()` keeps `.test.tsx`, `.spec.jsx`, and `.stories.tsx`.
+   They often contain interaction examples. Only type declarations and
+   snapshots are filtered as noise.
+
+6. The analyzer emits one flow per PR.
+
+   `_parse_flows()` returns `flows[:1]`. Responsive/multi-size support replays
+   the same flow across viewports. Do not ask the LLM for a separate flow per
+   viewport unless the product direction changes.
+
+7. Responsive recording is recorder-side, not analyzer-side.
+
+   The architecture is:
+
+   ```text
+   one LLM flow -> record_flows(..., viewports=...) -> N recordings
+   ```
+
+   This keeps LLM cost flat and keeps the prompt stable.
+
+8. Do not reintroduce ffmpeg as a required dependency.
+
+   Inline PR previews are screenshot-based GIFs from `api/gif_builder.py`
+   using Pillow. Playwright's raw video is still uploaded as a full recording
+   link when available. The action installs Playwright + Pillow, not ffmpeg.
+
+9. The `SemanticKey` bridge in `api/cloud_recorder.py:_to_key()` is order-sensitive.
+
+   Check specific selector patterns (`#id`, `data-testid`, `name`,
+   `aria-label`) before falling back to `xpath`. Playwright still receives the
+   raw normalized selector; `_to_key()` only affects recorded session metadata.
+
+10. `gpt-5.x` chat completions use `max_completion_tokens`.
+
+    Do not change OpenAI/Azure calls back to `max_tokens`.
+
+11. `_jobs` is intentionally in-memory for now.
+
+    It is a known hosted-API limitation. Do not silently replace it with a DB.
+    The intended future shape is a `JobStore` protocol plus Redis/Postgres
+    behind a design change.
+
+12. `JobStatus.job_id` is the field name.
+
+    Do not rename it to `id` in models, docs, or `_jobs`.
+
+13. `allow_origins=["*"]` is dev-mode behavior.
+
+    Keep existing behavior unless explicitly asked to harden production auth.
+    Do not copy this pattern into new security-sensitive code.
+
+## How To Implement Common Changes
+
+### Add or change a viewport profile
+
+Goal: support a new replay size/device while keeping one LLM flow.
+
+1. Edit `api/cloud_recorder.py`.
+   - Add the profile to `_VIEWPORT_PRESETS`.
+   - Add aliases to `_VIEWPORT_ALIASES` if useful.
+   - Keep `MAX_VIEWPORTS = 4` unless adding quota/rate controls.
+2. If the profile needs real mobile behavior, set `is_mobile`, `has_touch`,
+   `device_scale_factor`, and `user_agent` in the `ViewportProfile`.
+3. If the lower-level recorder needs a new browser-context option, add it to
+   `RecorderConfig` in `src/recordloop/capture/recorder.py` and pass it inside
+   `_setup_browser()`.
+4. Add/adjust tests in `api/tests/test_smoke.py` around `_resolve_viewports()`.
+5. Update `README.md` action docs and `api/README.md` request schema if the
+   user-facing option changes.
+6. Run the three required verification commands below.
+
+Do not change `api/analyzer.py` for viewport work unless the model truly needs
+new information in its prompt. Most responsive behavior should be tested by
+replaying the same flow at different sizes.
+
+### Add a new recorder action
+
+1. Add the action name to the analyzer prompt and submit schema in
+   `api/analyzer.py` only if the LLM should emit it.
+2. Add execution behavior in `api/cloud_recorder.py:_execute()`.
+3. Add an `ActionType` in `src/recordloop/core/session.py` only if the recorded
+   session model needs to store it semantically.
+4. Add smoke tests for parsing/dispatch or focused execution helpers where
+   possible without importing Playwright.
+5. If the prompt or tool schema changed, run one live LLM verification with a
+   real key before merging.
+
+### Add a new GitHub Action input
+
+1. Add the input to `action.yml`.
+2. Thread it into the `Run RecordLoop analyzer` step env.
+3. Parse it in `api/run_action.py`.
+4. Pass it to `analyze_pr()` or `record_flows()` as appropriate.
+5. Update `README.md`.
+6. If hosted API users need the same capability, add it to `api/models.py`,
+   thread it through `api/main.py`, and update `api/README.md`.
+7. Add smoke tests in `api/tests/test_smoke.py`.
+
+### Add a hosted API request option
+
+1. Add a nested model in `api/models.py`; do not flatten provider/recorder
+   specific fields onto `TriggerRequest` unless they are truly universal.
+2. Thread it through `api/main.py:_run_job`.
+3. Update `api/README.md` schema and examples.
+4. Add a smoke test with the existing `client` fixture.
+
+### Add a new LLM provider
+
+1. Add a branch to `_build_client()` or a provider-specific loop in
+   `api/analyzer.py`.
+2. Reuse OpenAI-compatible clients for vLLM/Ollama/OpenRouter-style APIs.
+   Do not add SDK dependencies unless the provider is incompatible.
+3. Add model/env resolution in `_resolve_model()`.
+4. Add nested provider config in `api/models.py`.
+5. Thread action inputs through `action.yml` and `api/run_action.py` if the
+   GitHub Action should support it.
+6. Add dry-run smoke tests and update `README.md` plus `api/README.md`.
+7. Run live provider verification with a real key before shipping.
+
+### Add a new analyzer tool
+
+1. Append the OpenAI tool schema to `_TOOLS` in `api/analyzer.py`.
+   `_ANTHROPIC_TOOLS` is derived from `_TOOLS`; keep it that way.
+2. Add a branch in `_dispatch_tool()`.
+3. Add a smoke test. Use `test_dispatch_tool_unknown_name` as the pattern.
+4. Update `_SYSTEM` only if the tool is not self-explanatory from its schema.
+5. Be conservative. New tools increase model freedom, runtime, and token cost.
+
+### Add a new UI framework/file type
+
+1. Edit `_is_component()` in `api/analyzer.py`.
+   Longer compound suffixes must come before bare suffixes.
+2. Add a case to `test_is_component_recognizes_framework`.
+3. Run `PYTHONPATH=.:src .venv/bin/pytest api/tests/test_smoke.py -k is_component -v`.
+
+## Responsive Recording Contract
+
+Current public knobs:
+
+```yaml
+with:
+  viewports: desktop,mobile,tall
+  wait-until: networkidle
+  settle-ms: "300"
 ```
 
-### 2. `RECORDLOOP_DRY_RUN=1` must skip the LLM entirely
-Checked at the **top** of `analyze_pr()`. If you add new code paths, make sure dry-run still short-circuits before any network call. The smoke tests rely on this — they run in CI with no `OPENAI_API_KEY`.
+Current hosted API shape:
 
-```python
-if _dry_run_enabled():
-    return _parse_flows(_DRY_RUN_FLOWS_PAYLOAD)
+```json
+{
+  "recording": {
+    "viewports": ["desktop", "mobile", "tall"],
+    "wait_until": "networkidle",
+    "settle_ms": 300
+  }
+}
 ```
 
-### 3. The agent loop's hard caps are not optional
-`MAX_ITERATIONS=10`, `MAX_FILES_READ=30`, `MAX_TOTAL_INPUT_TOKENS=50_000`. These bound the worst-case cost per PR to ~$0.10 even on reasoning models. **Do not raise them without a corresponding budget mechanism.** If a user wants higher caps, that's a per-request override, not a default change.
+Implementation path:
 
-### 4. Playwright must stay lazy-imported in `cloud_recorder.py`
-`from recordloop.capture.recorder import ...` is **inside** `_record_one()` (and `from recordloop.core.session import ...` is inside `_execute()` and `_to_key()`). This lets `api.main` boot without `playwright` installed, which is what makes Tier-1 CI fast and dependency-light. **If you import playwright at module load, you break the entire CI workflow.**
+```text
+action.yml inputs
+  -> api/run_action.py env parsing
+  -> record_flows(..., viewports=..., wait_until=..., settle_ms=...)
+  -> _resolve_viewports()
+  -> _record_one(..., viewport=ViewportProfile)
+  -> RecorderConfig(viewport_width, viewport_height, is_mobile, has_touch, ...)
+  -> Playwright context
+  -> screenshot frames
+  -> api/gif_builder.py
+  -> release asset upload
+  -> grouped PR comment per flow + viewport
+```
 
-### 5. Tests, specs, and stories are NOT filtered out
-`_is_component()` deliberately keeps `.test.tsx`, `.spec.jsx`, and `.stories.tsx` files. They contain literal interaction examples that give the LLM crucial signal. The only things filtered are `.d.ts` (type-only) and `__snapshots__/` (auto-generated noise). See the comment in `_is_component()`.
+Hosted API path:
 
-### 6. The `SemanticKey` bridge in `cloud_recorder._to_key()` is order-sensitive
-The new recorder takes `SemanticKey` objects, not raw CSS strings. `_to_key()` parses common shapes (`#id`, `[data-testid=…]`, `[name=…]`, `[aria-label=…]`) and falls back to `xpath`. **Playwright still receives the original raw selector** — `_to_key` only affects what gets stored in the recorded `Session`. Don't conflate the two.
+```text
+api/models.py RecordingConfig
+  -> api/main.py _run_job()
+  -> record_flows(...)
+  -> same recorder path
+```
 
-### 7. `gpt-5.4` requires `max_completion_tokens`, not `max_tokens`
-The gpt-5 family rejects `max_tokens` with a 400. Already fixed; don't accidentally revert it. Same applies to any future Azure deployment of a gpt-5-class model.
+Do not:
 
-### 8. The in-memory `_jobs: dict` is a known limitation, not a target
-Yes, it's not production-grade. Yes, it loses state on restart. The plan is a `JobStore` protocol with a Redis impl behind it. **Do not silently swap it for a database** — that's a structural change that needs design discussion. If you're tempted, file an issue first.
+- Generate separate LLM flows for each viewport.
+- Add per-viewport prompts by default.
+- Make ffmpeg required for inline previews.
+- Increase `MAX_VIEWPORTS` without thinking through runtime and release asset
+  upload volume.
 
-### 9. CORS is currently `allow_origins=["*"]` for dev convenience
-**This is a known prod risk** flagged in the security review. Keep it `*` for now (dev mode), but **do not** copy this pattern to any new endpoint without explicit approval.
+## Verification
 
-### 10. `JobStatus.id` is `JobStatus.job_id` — don't accidentally rename it back
-The model field and the dict key in `_jobs[...]` are both `job_id`. Old code (and docs) used `id`. Don't reintroduce the inconsistency.
-
----
-
-## Quick recipes
-
-Common tasks, with the exact files to touch and the verification step.
-
-### Add a new framework to the file filter
-
-1. Edit `_is_component()` in `api/analyzer.py:exts`. **Order matters** — longer compound suffixes (e.g. `.html.erb`) must come before bare ones (`.html`).
-2. Add a parametrize case to `test_is_component_recognizes_framework` in `api/tests/test_smoke.py`.
-3. Run `pytest api/tests/test_smoke.py -k is_component -v`.
-
-That's it. No prompt change needed — the system prompt already says "any framework that produces HTML."
-
-### Add a new LLM provider (e.g. AWS Bedrock, vLLM)
-
-1. Add a branch to `_build_client()` in `api/analyzer.py`.
-2. If the API surface is OpenAI-compatible (vLLM, Ollama, OpenRouter), reuse the `OpenAI` client with a custom `base_url`. **Do not add a new SDK dependency** unless the provider is genuinely incompatible.
-3. Add an env-var fallback in `_resolve_model()`.
-4. Extend `LLMConfig` in `api/models.py` if the provider needs new request fields. Nest them in a sub-model like `AzureConfig`, do **not** flatten onto `LLMConfig`.
-5. Add a smoke test that uses dry-run + the new provider name.
-6. Update the `LLMConfig` table in `api/README.md`.
-
-### Add a new tool to the agent loop
-
-1. Append the schema to `_TOOLS` in `api/analyzer.py`. Use the OpenAI function-calling JSON-schema format.
-2. Add a branch to `_dispatch_tool()`.
-3. Add a unit test in `api/tests/test_smoke.py` (look at `test_dispatch_tool_unknown_name` for the pattern).
-4. Update the system prompt only if the new tool is non-obvious — the model usually figures out tool semantics from the description field.
-5. **Be conservative.** Each new tool increases the agent's degrees of freedom and the iteration count. The current 4 tools are sufficient for 95% of cases.
-
-### Tighten or relax the cost caps
-
-1. The constants are `MAX_ITERATIONS`, `MAX_FILES_READ`, `MAX_TOTAL_INPUT_TOKENS`, `MAX_OUTPUT_TOKENS_PER_TURN` at the top of `api/analyzer.py`.
-2. **Do not** make them per-call function arguments unless you're also adding a billing/quota mechanism. They're constants because they're guardrails, not dials.
-3. The unit test `test_dispatch_tool_enforces_read_file_budget` locks in the read-file cap behavior. If you change `MAX_FILES_READ`, update that test.
-
-### Add a new HTTP endpoint
-
-1. Add a route in `api/main.py`. Follow the existing `/trigger` pattern: Pydantic body model + `Optional[Header]` for the API key + background task.
-2. Add the request/response models to `api/models.py`.
-3. Add the endpoint to the request schema table in `api/README.md`.
-4. Add a smoke test in `api/tests/test_smoke.py` using the existing `client` fixture.
-
-### Generate new test data for the smoke tests
-
-Use the `_sample_files()` helper in `api/tests/test_smoke.py`. **Do not** rely on real files in `src/components/` — those don't exist in CI checkouts and tests must be self-contained.
-
----
-
-## Verification — how to know you didn't break anything
-
-Run **all** of these before considering a change done:
+Run all three before considering an API/action change done:
 
 ```bash
-# 1. The smoke tests (zero secrets, <1s, must be 100% green)
 PYTHONPATH=.:src .venv/bin/pytest api/tests/test_smoke.py -v
+```
 
-# 2. Import-cleanliness check (proves Tier-1 doesn't need playwright)
+```bash
 .venv/bin/python -c "
 import sys
 class Block:
@@ -155,94 +299,81 @@ class Block:
     def load_module(self, name): raise ImportError(f'BLOCKED: {name}')
 sys.meta_path.insert(0, Block())
 from api.main import app
-print('OK — api.main imports without playwright')
+print('OK - api.main imports without playwright')
 "
+```
 
-# 3. Dry-run end-to-end (still no LLM call, exercises the full HTTP path)
+```bash
 RECORDLOOP_DRY_RUN=1 .venv/bin/python -c "
 from api.analyzer import analyze_pr
 flows = analyze_pr(
     [{'filename':'src/Foo.tsx','status':'modified','content':'<button id=go>Go</button>'}],
     preview_url='http://localhost:3000',
-)
+).flows
 assert flows and flows[0].name == 'dry_run_smoke_flow'
-print('OK — dry-run pipeline')
+print('OK - dry-run pipeline')
 "
 ```
 
-All three must pass. If any of them fail, **revert your change** and reconsider.
+Also run `PYTHONPATH=.:src .venv/bin/python -m py_compile ...` on changed
+Python modules when editing import-heavy files.
 
-### When you also need real-LLM verification
+### When live LLM verification is required
 
-If you touched anything in the agent loop (`_TOOLS`, `_dispatch_tool`, the iteration logic, the system prompt), you must also do at least one real run with a real key:
+Run a real provider call if you changed any of these:
 
-```bash
-OPENAI_API_KEY=sk-... .venv/bin/python << 'PY'
-from api.analyzer import analyze_pr
-flows = analyze_pr(
-    [{
-        "filename": "src/components/SignupForm.tsx",
-        "status": "modified",
-        "content": '<form><input data-testid="email"/><button data-testid="go">Go</button></form>',
-    }],
-    preview_url="http://localhost:3456",
-)
-print(f"got {len(flows)} flow(s)")
-for f in flows:
-    print(f"  {f.name}: {len(f.steps)} steps")
-PY
-```
+- `_TOOLS`
+- `_dispatch_tool()`
+- `_SYSTEM`
+- OpenAI/Azure/Anthropic message loop order
+- provider routing/model resolution
 
-Expected: 1–3 flows, each with 2–5 steps targeting the `data-testid` selectors. Cost: ~$0.005.
+Never commit real API keys.
 
-**Never commit a real API key.** Use env vars only.
+## Hot Zones
 
----
+- `api/analyzer.py:_FileIndex.overview()`: ordering and compact formatting
+  influence model behavior.
+- `api/analyzer.py:analyze_pr`: assistant tool-call messages must be appended
+  before tool result messages.
+- `api/cloud_recorder.py:_execute()`: action semantics must match the prompt
+  vocabulary and recorder session model.
+- `api/cloud_recorder.py:_resolve_viewports()`: accepts named profiles,
+  aliases, and bounded custom `WIDTHxHEIGHT`; keep validation strict.
+- `api/cloud_recorder.py:_to_key()`: selector matching order is intentional.
+- `api/run_action.py:_render_comment()`: groups multiple viewport recordings
+  under the same flow; preserve local-artifact fallback.
+- `action.yml`: many inputs support self-hosted/corporate runners. Do not
+  remove them while working on unrelated recorder changes.
+- `api/login_capture.py`: secrets must never be logged.
 
-## Hot zones — where to be extra careful
+## Out Of Scope Unless Explicitly Asked
 
-Code that has subtle behavior, where a "small fix" can quietly break something far away.
+- `js/` browser SDK.
+- `src/recordloop/cli/` local CLI.
+- `src/recordloop/bridge/` bridge server.
+- `demo/`, `example.py`, `demo_test.py`.
+- Generated/local output directories: `generated-tests/`, `.recordloop/`,
+  `recordloop.egg-info/`.
+- Personal/planning docs: `DISCUSSION.txt`, `PRODUCT.md`.
 
-### `api/analyzer.py:_FileIndex.overview()`
-Renders the overview the agent sees first. Ordering (UI files first), pagination, and the column layout all matter. Changing the format will silently degrade the LLM's behavior because models learn to expect specific structures from the system prompt.
+Read these for context if useful, but do not refactor them as part of API or
+recorder work.
 
-### `api/analyzer.py:analyze_pr` → message loop
-The order of operations inside the for-loop is load-bearing. **The assistant message with `tool_calls` MUST be appended before the `tool` result messages** — OpenAI's API rejects out-of-order messages with a 400. Don't refactor this loop without re-running the live OpenAI test.
+## Documentation Rule
 
-### `api/cloud_recorder.py:_to_key()`
-Order of regex matches matters. `data-testid` is checked **before** the bare `id` branch because `[data-testid=foo]` would otherwise be matched as if it started with `[`. If you add a new selector strategy, add it in the right place.
+Any user-facing input, API field, environment variable, provider, recording
+behavior, auth behavior, or artifact behavior must be documented in the same
+change:
 
-### `api/main.py:_check_api_key()`
-Currently allows missing key in dev mode (when no `RECORDLOOP_API_KEY` / `RECORDLOOP_VALID_KEYS` is set). **The Ops review flagged this** — eventually we should fail closed in prod. Don't replicate the dev-mode pattern in any new auth check.
+- GitHub Action behavior: update `README.md` and `action.yml`.
+- Hosted API behavior: update `api/README.md` and `api/models.py`.
+- Agent-facing implementation behavior: update this file.
 
-### `_DRY_RUN_FLOWS_PAYLOAD` in `api/analyzer.py`
-This canned JSON shape is used by ~10 tests. If you change the shape, you'll need to update every test that asserts against `dry_run_smoke_flow`.
+## One-Line Summary
 
----
-
-## Out of scope (don't touch unless explicitly asked)
-
-These directories work, are independently tested, and have nothing to do with the agent loop. Don't refactor them to "match the api/ patterns":
-
-- `js/` — Browser SDK. Has its own build pipeline.
-- `src/recordloop/cli/` — Local CLI. Used by `python -m recordloop`.
-- `src/recordloop/bridge/` — Bridge server that the JS SDK posts to.
-- `demo/`, `example.py`, `demo_test.py` — Standalone demos.
-- `generated-tests/` — Output directory.
-- `recordloop.egg-info/` — Build artifact.
-- `.recordloop/` — Local user data.
-- `DISCUSSION.txt`, `PRODUCT.md` — Personal notes / planning docs.
-
-You may **read** any of these for context. Just don't modify them as part of api/ work.
-
----
-
-## License
-
-MIT (see `LICENSE` once it's added — `pyproject.toml` already declares `license = { text = "MIT" }`). Project is being prepared for open-source release. **Never commit secrets**, especially `.env` files, GitHub tokens, OpenAI keys, AWS credentials. If you find one in git history, flag it immediately rather than deleting silently.
-
----
-
-## One-line summary for your context window
-
-> RecordLoop is a PR-diff → AI-flow → Playwright-video pipeline. The agent loop lives in `api/analyzer.py`, runs OpenAI/Azure with bounded cost (`MAX_ITERATIONS=10`, `MAX_FILES_READ=30`, `MAX_TOTAL_INPUT_TOKENS=50K`), supports `RECORDLOOP_DRY_RUN=1` for zero-cost CI, and is verified by `api/tests/test_smoke.py` (55 tests, <1s, zero secrets). Don't break the dry-run path, the lazy playwright import, or the public `analyze_pr()` signature.
+RecordLoop is a PR-diff -> one AI-generated flow -> Playwright replay at one
+or more viewport profiles -> screenshot GIF/full recording -> PR comment
+pipeline. Keep LLM cost bounded, keep dry-run zero-secret, keep Playwright
+lazy-imported, and implement responsive behavior in the recorder, not the
+analyzer.

@@ -3,22 +3,29 @@
 A FastAPI service that turns a GitHub PR diff into recorded Playwright sessions, automatically.
 
 ```
-PR opened ──► /trigger ──► fetch changed files ──► LLM picks flows ──► Playwright records ──► PR comment with video
+PR opened ──► /trigger ──► fetch changed files ──► LLM picks one flow ──► Playwright replays viewports ──► PR comment + job result
 ```
 
-The LLM step is provider-agnostic: **OpenAI** or **Azure OpenAI**. Default model is `gpt-5.4`.
+The LLM step is provider-agnostic: **OpenAI**, **Azure OpenAI**, or
+**Anthropic**. Default model is `gpt-5.4` for OpenAI/Azure and
+`claude-opus-4-7` for Anthropic.
 
 ---
 
 ## What it does
 
 1. **Fetches the PR diff** via the GitHub API (`api/github_client.py`)
-2. **Filters to UI components** (`.tsx`, `.jsx`, `.vue`, `.svelte`, `.html` — skips `.test/.spec/.stories`)
-3. **Asks the LLM** to generate 1–3 realistic interaction flows as strict JSON (`api/analyzer.py`)
-4. **Replays each flow** with Playwright against a preview URL (`api/cloud_recorder.py`)
-5. **Posts a PR comment** with a "Watch recording" link per flow
+2. **Filters to UI surfaces** (`.tsx`, `.jsx`, `.vue`, `.svelte`, templates, HTML; keeps tests/stories for context)
+3. **Runs an LLM agent loop** to generate exactly one focused interaction flow (`api/analyzer.py`)
+4. **Replays that flow** with Playwright at the configured viewport(s) (`api/cloud_recorder.py`)
+5. **Posts/updates a PR comment** with recording status, artifact paths/URLs, assertions, and cost
 
-Jobs run in the background. `/jobs/{id}` returns status: `queued → analyzing → recording → done | failed`.
+The GitHub Action path uploads GIF/video artifacts to a repo release before
+rendering the PR comment. The hosted FastAPI path records local artifact paths
+unless your deployment adds an upload/storage layer and populates `gif_url` /
+`video_url`.
+
+Jobs run in the background. `/jobs/{job_id}` returns status: `queued → analyzing → recording → done | failed`.
 
 ---
 
@@ -34,7 +41,7 @@ playwright install chromium
 
 ## Configure the LLM provider
 
-Pick **one** of these two setups.
+Pick **one** of these provider setups.
 
 ### OpenAI
 
@@ -52,7 +59,16 @@ export AZURE_OPENAI_DEPLOYMENT=my-gpt-5-4-deployment
 export AZURE_OPENAI_API_VERSION=2024-10-21   # optional
 ```
 
-You can also pass any of these per-request in the `/trigger` body — request values override env vars.
+### Anthropic
+
+```bash
+export ANTHROPIC_API_KEY=...
+export ANTHROPIC_BASE_URL=https://api.anthropic.com/v1  # optional
+export ANTHROPIC_MODEL=claude-opus-4-7                  # optional
+```
+
+You can also pass provider settings per request in the `/trigger` body;
+request values override env vars.
 
 ---
 
@@ -158,13 +174,22 @@ curl http://localhost:8080/jobs/a1b2c3d4
 
 ```json
 {
-  "id": "a1b2c3d4",
+  "job_id": "a1b2c3d4",
   "status": "done",
   "files_changed": 7,
-  "flows_generated": 2,
+  "flows_generated": 1,
   "recordings": [
-    { "name": "submit_signup_form", "video_url": "https://...s3.../signup.webm", "status": "ok" },
-    { "name": "open_settings_modal", "video_url": "https://...s3.../settings.webm", "status": "ok" }
+    {
+      "name": "submit_signup_form",
+      "viewport": "desktop",
+      "viewport_width": 1280,
+      "viewport_height": 720,
+      "gif": "/tmp/recordloop-videos/signup-desktop.gif",
+      "video": "/tmp/recordloop-videos/signup.webm",
+      "gif_url": null,
+      "video_url": null,
+      "status": "passed"
+    }
   ]
 }
 ```
@@ -184,7 +209,7 @@ from api.analyzer import analyze_pr
 flows = analyze_pr(
     [{'filename': 'Foo.tsx', 'status': 'modified', 'content': '<button id=go>Go</button>'}],
     'http://localhost:3000',
-)
+).flows
 for f in flows:
     print(f.name, '—', f.description)
 "
@@ -210,8 +235,8 @@ fake_files = [{
 flows = analyze_pr(
     changed_files=fake_files,
     preview_url="http://localhost:3000",
-    provider="openai",   # or "azure"
-)
+    provider="openai",   # or "azure" / "anthropic"
+).flows
 
 for f in flows:
     print(f.name, "—", f.description)
@@ -224,21 +249,12 @@ export OPENAI_API_KEY=sk-...
 python scratch_test.py
 ```
 
-### Option C — Mock the LLM call (unit test)
+### Option C — Unit-test parser/recorder helpers
 
-```python
-from unittest.mock import patch
-from api.analyzer import analyze_pr
-
-fake_response = '{"flows":[{"name":"t","description":"d","component_file":"x.tsx","navigate_to":"/","steps":[]}]}'
-
-with patch("api.analyzer._call_llm", return_value=fake_response):
-    flows = analyze_pr(
-        [{"filename": "x.tsx", "status": "modified", "content": "<button/>"}],
-        "http://localhost:3000",
-    )
-    assert flows[0].name == "t"
-```
+The analyzer is an agent loop, not a single `_call_llm` helper. For zero-secret
+tests, exercise helpers directly (`_parse_flows`, `_resolve_viewports`,
+`_dispatch_tool`) or use `RECORDLOOP_DRY_RUN=1`. See `api/tests/test_smoke.py`
+for the supported patterns.
 
 ---
 
@@ -303,10 +319,11 @@ No secrets required beyond the auto-provided `GITHUB_TOKEN`. To run the **real**
 
 | Field      | Type          | Notes                                                |
 |------------|---------------|------------------------------------------------------|
-| `provider` | string        | `"openai"` (default) or `"azure"`                    |
-| `model`    | string        | Defaults to `gpt-5.4`                                |
+| `provider` | string        | `"openai"` (default), `"azure"`, or `"anthropic"` |
+| `model`    | string        | Defaults to `gpt-5.4` or `claude-opus-4-7`        |
 | `api_key`  | string        | Used when `provider == "openai"`. Overrides env var. |
-| `azure`    | `AzureConfig` | Required only when `provider == "azure"`             |
+| `azure`    | `AzureConfig` | Required only when `provider == "azure"`          |
+| `anthropic` | `AnthropicConfig` | Required only when `provider == "anthropic"` |
 
 **`RecordingConfig`**
 
@@ -325,6 +342,14 @@ No secrets required beyond the auto-provided `GITHUB_TOKEN`. To run the **real**
 | `deployment`  | string | Overrides `AZURE_OPENAI_DEPLOYMENT`|
 | `api_version` | string | Defaults to `2024-10-21`           |
 
+**`AnthropicConfig`**
+
+| Field         | Type   | Notes |
+|---------------|--------|-------|
+| `api_key`     | string | Overrides `ANTHROPIC_API_KEY` |
+| `base_url`    | string | Native Anthropic or Azure AI Foundry project URL |
+| `api_version` | string | Optional Foundry `?api-version=` query param |
+
 ---
 
 ## Endpoints
@@ -333,7 +358,7 @@ No secrets required beyond the auto-provided `GITHUB_TOKEN`. To run the **real**
 |--------|----------------|----------------------------------------------|
 | GET    | `/health`      | Liveness                                     |
 | POST   | `/trigger`     | Start an analyze-and-record job (background) |
-| GET    | `/jobs/{id}`   | Job status + results                         |
+| GET    | `/jobs/{job_id}` | Job status + results                        |
 
 Header on `/trigger`: `X-Api-Key: <your key>` (skipped if no key configured).
 
@@ -341,8 +366,8 @@ Header on `/trigger`: `X-Api-Key: <your key>` (skipped if no key configured).
 
 ## Files
 
-- `api/analyzer.py` — LLM provider switch + flow generation (`analyze_pr`, `_call_llm`)
-- `api/cloud_recorder.py` — Playwright replay of generated flows
+- `api/analyzer.py` — LLM provider switch + agentic flow generation (`analyze_pr`)
+- `api/cloud_recorder.py` — Playwright replay, viewport profiles, screenshot GIF capture
 - `api/github_client.py` — Fetch PR files, post comments
-- `api/main.py` — FastAPI app, `/trigger`, `/jobs/{id}`, background runner
+- `api/main.py` — FastAPI app, `/trigger`, `/jobs/{job_id}`, background runner
 - `api/models.py` — Pydantic request/response models
