@@ -28,12 +28,21 @@ class LLMConfig(BaseModel):
     anthropic: Optional[AnthropicConfig] = None
 
 
+class RecordingConfig(BaseModel):
+    # Named profiles: desktop, mobile, tablet, tall. Custom WIDTHxHEIGHT is
+    # also accepted by cloud_recorder for one-off breakpoints.
+    viewports: list[str] = Field(default_factory=lambda: ["desktop"])
+    wait_until: Literal["networkidle", "load", "domcontentloaded"] = "networkidle"
+    settle_ms: int = Field(default=300, ge=0, le=10_000)
+
+
 class TriggerRequest(BaseModel):
     repo: str                                # "owner/repo"
     pr_number: int
     preview_url: str = ""                     # Vercel/Netlify/etc. preview URL
     github_token: str                        # for reading PR + posting comment
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    recording: RecordingConfig = Field(default_factory=RecordingConfig)
     pr_head_sha: str = ""                    # for fetching .github/recordloop.md at correct ref
 
 

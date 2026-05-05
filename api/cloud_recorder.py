@@ -6,14 +6,114 @@ preview URL. Returns video paths (and optionally S3 URLs).
 """
 
 import re
-import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from .analyzer import InteractionFlow, InteractionStep
 
 VIDEO_DIR = "/tmp/recordloop-videos"
+MAX_VIEWPORTS = 4
+
+_MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+    "Mobile/15E148 Safari/604.1"
+)
+
+
+@dataclass(frozen=True)
+class ViewportProfile:
+    name: str
+    label: str
+    width: int
+    height: int
+    is_mobile: bool = False
+    has_touch: bool = False
+    device_scale_factor: float | None = None
+    user_agent: str = ""
+
+
+_VIEWPORT_PRESETS: dict[str, ViewportProfile] = {
+    "desktop": ViewportProfile("desktop", "Desktop", 1280, 720),
+    "mobile": ViewportProfile(
+        "mobile",
+        "Mobile",
+        390,
+        844,
+        is_mobile=True,
+        has_touch=True,
+        device_scale_factor=3,
+        user_agent=_MOBILE_USER_AGENT,
+    ),
+    "tablet": ViewportProfile(
+        "tablet",
+        "Tablet",
+        768,
+        1024,
+        has_touch=True,
+        device_scale_factor=2,
+    ),
+    "tall": ViewportProfile("tall", "Tall", 1280, 1600),
+}
+
+_VIEWPORT_ALIASES = {
+    "phone": "mobile",
+    "iphone": "mobile",
+    "desktop-tall": "tall",
+    "long": "tall",
+}
+
+
+def _resolve_viewports(viewports: list[str] | str | None = None) -> list[ViewportProfile]:
+    """Resolve named/custom viewport specs into concrete Playwright profiles."""
+    if viewports is None or viewports == "":
+        parts = ["desktop"]
+    elif isinstance(viewports, str):
+        parts = [p.strip() for p in viewports.split(",") if p.strip()]
+    else:
+        parts = []
+        for item in viewports:
+            parts.extend(p.strip() for p in str(item).split(",") if p.strip())
+
+    if not parts:
+        parts = ["desktop"]
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        key = _VIEWPORT_ALIASES.get(part.lower(), part.lower())
+        if key not in seen:
+            deduped.append(part)
+            seen.add(key)
+
+    if len(deduped) > MAX_VIEWPORTS:
+        raise ValueError(f"at most {MAX_VIEWPORTS} viewport profiles can be recorded per job")
+
+    profiles: list[ViewportProfile] = []
+    for raw in deduped:
+        key = _VIEWPORT_ALIASES.get(raw.lower(), raw.lower())
+        preset = _VIEWPORT_PRESETS.get(key)
+        if preset:
+            profiles.append(preset)
+            continue
+
+        m = re.fullmatch(r"(\d{3,4})x(\d{3,4})", key)
+        if not m:
+            valid = ", ".join(sorted(_VIEWPORT_PRESETS))
+            raise ValueError(
+                f"unknown viewport profile {raw!r}; use one of {valid} or WIDTHxHEIGHT"
+            )
+        width, height = int(m.group(1)), int(m.group(2))
+        if not (320 <= width <= 2560 and 480 <= height <= 3000):
+            raise ValueError(
+                f"viewport {raw!r} is outside the supported range "
+                "(width 320-2560, height 480-3000)"
+            )
+        profiles.append(ViewportProfile(f"{width}x{height}", f"{width}x{height}", width, height))
+
+    return profiles
 
 
 def record_flows(
@@ -22,6 +122,9 @@ def record_flows(
     base_url: str = "",  # accepted for backwards compat but no longer used
     *,
     storage_state: dict | None = None,
+    viewports: list[str] | str | None = None,
+    wait_until: str = "networkidle",
+    settle_ms: int = 300,
 ) -> list[dict]:
     """Record each interaction flow against the preview URL.
 
@@ -30,10 +133,22 @@ def record_flows(
     runtime for marginal value and the agent now generates a single targeted
     flow per PR anyway.
     """
-    return [
-        _record_one(flow, preview_url, label="after", storage_state=storage_state)
-        for flow in flows
-    ]
+    profiles = _resolve_viewports(viewports)
+    results: list[dict] = []
+    for flow in flows:
+        for profile in profiles:
+            results.append(
+                _record_one(
+                    flow,
+                    preview_url,
+                    label=profile.name,
+                    storage_state=storage_state,
+                    viewport=profile,
+                    wait_until=wait_until,
+                    settle_ms=settle_ms,
+                )
+            )
+    return results
 
 
 def _record_one(
@@ -42,9 +157,15 @@ def _record_one(
     label: str = "after",
     *,
     storage_state: dict | None = None,
+    viewport: ViewportProfile | None = None,
+    wait_until: str = "networkidle",
+    settle_ms: int = 300,
 ) -> dict:
     # Lazy import — only pulled in when an actual recording is requested.
     from recordloop.capture.recorder import PlaywrightRecorder, RecorderConfig
+
+    profile = viewport or _VIEWPORT_PRESETS["desktop"]
+    settle_seconds = max(0, min(int(settle_ms or 0), 10_000)) / 1000
 
     # No slow_mo: Playwright's natural action timing reads as smooth in
     # the recording. slow_mo=200 inserted hitches between every operation
@@ -53,6 +174,12 @@ def _record_one(
         base_url=preview_url,
         video_dir=VIDEO_DIR,
         headless=True,
+        viewport_width=profile.width,
+        viewport_height=profile.height,
+        is_mobile=profile.is_mobile,
+        has_touch=profile.has_touch,
+        device_scale_factor=profile.device_scale_factor,
+        user_agent=profile.user_agent,
         storage_state=storage_state,
     )
 
@@ -68,6 +195,10 @@ def _record_one(
         # page screenshots so reviewers see the flow without leaving the PR.
         "gif": None,
         "gif_url": None,
+        "viewport": profile.name,
+        "viewport_label": profile.label,
+        "viewport_width": profile.width,
+        "viewport_height": profile.height,
         # Assertion outcomes — used by run_action.py to render pass/fail.
         "assertions_total": 0,
         "assertions_passed": 0,
@@ -94,18 +225,9 @@ def _record_one(
                 start = preview_url.rstrip("/") + "/" + start.lstrip("/")
 
             page = recorder.start_recording(start)
-            # Pages with streaming media, WebGL, or infinite animations never
-            # reach networkidle. Try it first (gives cleaner frame for SPAs
-            # that do have a quiescent state), but fall back gracefully.
-            try:
-                page.wait_for_load_state("networkidle", timeout=8000)
-            except Exception:
-                try:
-                    page.wait_for_load_state("load", timeout=5000)
-                except Exception:
-                    pass
+            _wait_for_ready_state(page, wait_until=wait_until)
             # Wait for the initial page load to settle.
-            time.sleep(0.3)
+            time.sleep(settle_seconds)
             snap()  # opening frame of the slideshow
 
             for i, step in enumerate(flow.steps):
@@ -184,6 +306,28 @@ def _record_one(
         result["error"] = str(e)
 
     return result
+
+
+def _wait_for_ready_state(page, wait_until: str = "networkidle") -> None:
+    """Wait for the page to be record-ready without hanging on busy apps."""
+    state = (wait_until or "networkidle").lower()
+    if state not in {"networkidle", "load", "domcontentloaded"}:
+        state = "networkidle"
+
+    if state == "networkidle":
+        # Pages with streaming media, WebGL, or infinite animations never
+        # reach networkidle. Try it first, then fall back gracefully.
+        try:
+            page.wait_for_load_state("networkidle", timeout=8000)
+            return
+        except Exception:
+            state = "load"
+
+    timeout = 5000 if state == "load" else 3000
+    try:
+        page.wait_for_load_state(state, timeout=timeout)
+    except Exception:
+        pass
 
 
 def _normalize_selector(sel: str) -> str:

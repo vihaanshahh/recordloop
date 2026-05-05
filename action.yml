@@ -74,6 +74,18 @@ inputs:
     description: 'Base64-encoded Playwright storageState.json for authenticated pages. Store as a GitHub Secret.'
     required: false
     default: ''
+  viewports:
+    description: 'Comma-separated recording profiles: desktop, mobile, tablet, tall, or custom WIDTHxHEIGHT. Example: desktop,mobile,tall.'
+    required: false
+    default: 'desktop'
+  wait-until:
+    description: 'Page readiness state before actions begin: networkidle, load, or domcontentloaded.'
+    required: false
+    default: 'networkidle'
+  settle-ms:
+    description: 'Extra milliseconds to wait after the page is ready before actions begin.'
+    required: false
+    default: '300'
   skip-python-setup:
     description: 'Skip the actions/setup-python step. Set to "true" when running inside a container that already has Python 3.10+ on PATH (e.g. corporate self-hosted runners with custom images). Caller is responsible for ensuring `python3` works.'
     required: false
@@ -622,6 +634,9 @@ runs:
         # wrote into env via $GITHUB_ENV (named RECORDLOOP_STORAGE_STATE there
         # too). Without this fallback the empty input would clobber it.
         RECORDLOOP_STORAGE_STATE: ${{ inputs.storage-state != '' && inputs.storage-state || env.RECORDLOOP_STORAGE_STATE }}
+        RECORDLOOP_VIEWPORTS: ${{ inputs.viewports }}
+        RECORDLOOP_WAIT_UNTIL: ${{ inputs.wait-until }}
+        RECORDLOOP_SETTLE_MS: ${{ inputs.settle-ms }}
         # Threaded through so run_action.py can detect "login was configured
         # but capture produced nothing" and fail fast (otherwise we'd silently
         # record the login page).

@@ -168,6 +168,44 @@ def test_trigger_with_api_key_gating(client, fake_github):
         del os.environ["RECORDLOOP_API_KEY"]
 
 
+def test_trigger_threads_recording_options_to_recorder(client, fake_github):
+    captured = {}
+
+    def fake_record_flows(flows, preview_url, **kwargs):
+        captured.update(kwargs)
+        return [{
+            "name": flows[0].name,
+            "description": flows[0].description,
+            "status": "passed",
+            "video_url": "https://example.com/video.mp4",
+            "viewport": "mobile",
+            "viewport_label": "Mobile",
+            "viewport_width": 390,
+            "viewport_height": 844,
+            "assertions_total": 1,
+            "assertions_passed": 1,
+            "assertion_failures": [],
+        }]
+
+    with patch("api.main.record_flows", side_effect=fake_record_flows):
+        r = client.post("/trigger", json={
+            "repo": "vihaanshahh/recordloop",
+            "pr_number": 42,
+            "preview_url": "https://preview.example.com",
+            "github_token": "fake-token",
+            "recording": {
+                "viewports": ["desktop", "mobile"],
+                "wait_until": "load",
+                "settle_ms": 900,
+            },
+        })
+
+    assert r.status_code == 200
+    assert captured["viewports"] == ["desktop", "mobile"]
+    assert captured["wait_until"] == "load"
+    assert captured["settle_ms"] == 900
+
+
 def test_get_job_404_for_unknown_id(client):
     r = client.get("/jobs/does-not-exist")
     assert r.status_code == 404
@@ -611,6 +649,39 @@ def test_analyze_pr_ignore_paths_removes_all_ui():
 
 
 # ---------------------------------------------------------------------------
+# Recorder viewport profile tests (no Playwright import required)
+# ---------------------------------------------------------------------------
+
+from api.cloud_recorder import _resolve_viewports  # noqa: E402
+
+
+def test_resolve_viewports_defaults_to_desktop():
+    profiles = _resolve_viewports(None)
+    assert len(profiles) == 1
+    assert profiles[0].name == "desktop"
+    assert profiles[0].width == 1280
+    assert profiles[0].height == 720
+
+
+def test_resolve_viewports_named_alias_and_custom():
+    profiles = _resolve_viewports("desktop,phone,tall,414x896")
+    assert [p.name for p in profiles] == ["desktop", "mobile", "tall", "414x896"]
+    assert profiles[1].is_mobile is True
+    assert profiles[1].has_touch is True
+    assert profiles[2].height == 1600
+
+
+def test_resolve_viewports_rejects_unknown_profile():
+    with pytest.raises(ValueError, match="unknown viewport"):
+        _resolve_viewports("desktop,fridge")
+
+
+def test_resolve_viewports_caps_profile_count():
+    with pytest.raises(ValueError, match="at most"):
+        _resolve_viewports("desktop,mobile,tablet,tall,1024x1365")
+
+
+# ---------------------------------------------------------------------------
 # Additional edge-case tests (from review)
 # ---------------------------------------------------------------------------
 
@@ -792,6 +863,50 @@ def test_render_comment_no_flows_includes_cost_footer():
     body = _render_comment([], "", recordings=None, cost=cost)
     assert "No recordable UI changes" in body
     assert "claude-opus-4-7" in body
+
+
+def test_render_comment_groups_multiple_viewport_recordings():
+    from api.analyzer import InteractionFlow, InteractionStep
+    flow = InteractionFlow(
+        name="hero_cta_clicked",
+        description="Click the hero CTA",
+        component_file="src/Hero.tsx",
+        navigate_to="/",
+        change_context="The PR adds an href; this asserts it.",
+        steps=[
+            InteractionStep(action="click", selector="[data-testid=cta]"),
+            InteractionStep(action="assert_visible", selector="[data-testid=cta]"),
+        ],
+    )
+    recordings = [
+        {
+            "name": "hero_cta_clicked",
+            "status": "passed",
+            "gif_url": "https://example.com/desktop.gif",
+            "viewport": "desktop",
+            "viewport_label": "Desktop",
+            "viewport_width": 1280,
+            "viewport_height": 720,
+            "assertions_total": 1,
+            "assertions_passed": 1,
+        },
+        {
+            "name": "hero_cta_clicked",
+            "status": "passed",
+            "gif_url": "https://example.com/mobile.gif",
+            "viewport": "mobile",
+            "viewport_label": "Mobile",
+            "viewport_width": 390,
+            "viewport_height": 844,
+            "assertions_total": 1,
+            "assertions_passed": 1,
+        },
+    ]
+    body = _render_comment([flow], "https://preview.example.com", recordings=recordings)
+    assert "Desktop (1280x720)" in body
+    assert "Mobile (390x844)" in body
+    assert "desktop.gif" in body
+    assert "mobile.gif" in body
 
 
 # ---------------------------------------------------------------------------

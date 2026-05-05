@@ -15,7 +15,7 @@ from typing import Optional
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 
-from .models import TriggerRequest, TriggerResponse, JobStatus, LLMConfig
+from .models import TriggerRequest, TriggerResponse, JobStatus, LLMConfig, RecordingConfig
 from .analyzer import analyze_pr
 from .github_client import get_pr_files, upsert_pr_comment
 from .cloud_recorder import record_flows
@@ -68,6 +68,7 @@ async def trigger(
         preview_url=req.preview_url or "",
         github_token=req.github_token,
         llm=req.llm,
+        recording=req.recording,
         pr_head_sha=req.pr_head_sha or "",
     )
 
@@ -97,6 +98,7 @@ async def _run_job(
     preview_url: str,
     github_token: str,
     llm: LLMConfig,
+    recording: RecordingConfig,
     pr_head_sha: str = "",
 ):
     job = _jobs[job_id]
@@ -183,7 +185,13 @@ async def _run_job(
         if preview_url:
             job["status"] = "recording"
             results = await asyncio.to_thread(
-                record_flows, flows, preview_url, storage_state=storage_state,
+                record_flows,
+                flows,
+                preview_url,
+                storage_state=storage_state,
+                viewports=recording.viewports,
+                wait_until=recording.wait_until,
+                settle_ms=recording.settle_ms,
             )
             job["recordings"] = results
             print(f"[{job_id}] Recorded {len(results)} flow(s)")
@@ -230,17 +238,30 @@ async def _post_comment(repo: str, pr_number: int, token: str, job: dict):
         status = r.get("status", "")
         name = r.get("name", "recording")
         desc = r.get("description", "")
+        viewport = r.get("viewport_label") or r.get("viewport") or ""
+        width = r.get("viewport_width")
+        height = r.get("viewport_height")
+        viewport_suffix = ""
+        if viewport:
+            viewport_suffix = f" · {viewport}"
+            if width and height:
+                viewport_suffix += f" ({width}x{height})"
 
         if status == "planned":
             lines += [f"**{name}** _(planned — no preview URL)_", f"> {desc}", ""]
         elif r.get("video_url"):
-            lines += [f"**{name}**", f"> {desc}", f"[▶ Watch recording]({r['video_url']})", ""]
+            lines += [
+                f"**{name}{viewport_suffix}**",
+                f"> {desc}",
+                f"[▶ Watch recording]({r['video_url']})",
+                "",
+            ]
         elif r.get("video"):
-            lines += [f"**{name}**", f"> {desc}", f"Video: `{r['video']}`", ""]
+            lines += [f"**{name}{viewport_suffix}**", f"> {desc}", f"Video: `{r['video']}`", ""]
         elif status == "failed":
-            lines += [f"**{name}** _(recording failed: {r.get('error', '')})_", ""]
+            lines += [f"**{name}{viewport_suffix}** _(recording failed: {r.get('error', '')})_", ""]
         else:
-            lines += [f"**{name}**", f"> {desc}", ""]
+            lines += [f"**{name}{viewport_suffix}**", f"> {desc}", ""]
 
     if not recordings and not error and not note:
         lines.append("No recordings generated.")

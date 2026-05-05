@@ -34,6 +34,10 @@ class RecorderConfig:
     slow_mo: int = 0
     viewport_width: int = 1280
     viewport_height: int = 720
+    is_mobile: bool = False
+    has_touch: bool = False
+    device_scale_factor: float | None = None
+    user_agent: str = ""
     executable_path: str = ""
     storage_state: dict | str | None = None
 
@@ -111,6 +115,14 @@ class PlaywrightRecorder:
         }
         if self.config.storage_state is not None:
             ctx_kwargs["storage_state"] = self.config.storage_state
+        if self.config.is_mobile:
+            ctx_kwargs["is_mobile"] = True
+        if self.config.has_touch:
+            ctx_kwargs["has_touch"] = True
+        if self.config.device_scale_factor is not None:
+            ctx_kwargs["device_scale_factor"] = self.config.device_scale_factor
+        if self.config.user_agent:
+            ctx_kwargs["user_agent"] = self.config.user_agent
 
         self._context = self._browser.new_context(**ctx_kwargs)
         self._page = self._context.new_page()
@@ -203,6 +215,9 @@ class PlaywrightRecorder:
             viewport=(self.config.viewport_width, self.config.viewport_height),
             meta={
                 "video_path": str(self._video_path) if self._video_path else None,
+                "is_mobile": self.config.is_mobile,
+                "has_touch": self.config.has_touch,
+                "device_scale_factor": self.config.device_scale_factor,
             },
         )
         return session

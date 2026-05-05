@@ -136,6 +136,20 @@ For OpenAI overrides, use the flat `llm.api_key` instead of `llm.azure`:
 { "llm": { "provider": "openai", "model": "gpt-5.4", "api_key": "sk-..." } }
 ```
 
+### Responsive recording override
+
+```json
+{
+  "recording": {
+    "viewports": ["desktop", "mobile", "tall"],
+    "settle_ms": 800
+  }
+}
+```
+
+The same generated flow is replayed at each viewport, so LLM cost does not
+increase.
+
 ### Poll the job
 
 ```bash
@@ -283,6 +297,7 @@ No secrets required beyond the auto-provided `GITHUB_TOKEN`. To run the **real**
 | `preview_url`  | string      | no       | If empty, recordings are skipped (dry run) |
 | `github_token` | string      | yes      | Needs PR read + comment write              |
 | `llm`          | `LLMConfig` | no       | Provider config — falls back to env vars   |
+| `recording`    | `RecordingConfig` | no | Viewport/load config for Playwright replay |
 
 **`LLMConfig`**
 
@@ -292,6 +307,14 @@ No secrets required beyond the auto-provided `GITHUB_TOKEN`. To run the **real**
 | `model`    | string        | Defaults to `gpt-5.4`                                |
 | `api_key`  | string        | Used when `provider == "openai"`. Overrides env var. |
 | `azure`    | `AzureConfig` | Required only when `provider == "azure"`             |
+
+**`RecordingConfig`**
+
+| Field               | Type         | Default       | Notes |
+|---------------------|--------------|---------------|-------|
+| `viewports`         | list[string] | `["desktop"]` | Named profiles: `desktop`, `mobile`, `tablet`, `tall`; custom `WIDTHxHEIGHT` also works. |
+| `wait_until`        | string       | `networkidle` | `networkidle`, `load`, or `domcontentloaded`. |
+| `settle_ms`         | int          | `300`         | Extra wait after readiness before interactions begin. |
 
 **`AzureConfig`**
 

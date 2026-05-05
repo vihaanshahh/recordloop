@@ -83,9 +83,9 @@ On every PR, the action will:
 2. Hand the diff to an agent loop with `read_diff` / `read_file` / `list_files` / `submit_flows` tools
 3. Generate one short Playwright flow targeted at the changed lines
 4. Auto-start your app on the runner (or use a `preview-url` you provide)
-5. Replay the flow with Playwright, record it as MP4 + GIF
-6. Upload the GIF to a `recordloop-recordings` release in your repo
-7. Post a PR comment with the GIF rendered inline
+5. Replay the flow with Playwright at the selected viewport(s), record MP4 + GIF
+6. Upload the GIF(s) to a `recordloop-recordings` release in your repo
+7. Post a PR comment with the GIF(s) rendered inline
 
 ## OSS maintainers: fork PRs with a label gate
 
@@ -139,6 +139,9 @@ Re-running on `synchronize` keeps the same comment (RecordLoop edits in place), 
 | `start-port` | _(auto-probe)_ | Port to probe for the app. Default tries `3000, 3001, 4173, 5173, 4321, 8080`. |
 | `node-version` | `20` | Node version to install when auto-start is enabled. |
 | `python-version` | `3.12` | Python version to install for the runner. |
+| `viewports` | `desktop` | Comma-separated recording profiles: `desktop`, `mobile`, `tablet`, `tall`, or custom `WIDTHxHEIGHT`. |
+| `wait-until` | `networkidle` | Page readiness state before actions begin: `networkidle`, `load`, or `domcontentloaded`. |
+| `settle-ms` | `300` | Extra wait after the page is ready before actions begin. |
 | `model` | `gpt-5.4` | Override the analyzer model. Try `gpt-4o-mini` for the cheapest setup. |
 | `provider` | `openai` | `openai` (default), `azure`, or `anthropic`. |
 | `azure-openai-api-key` | _(empty)_ | Azure OpenAI API key. Required when `provider: azure`. |
@@ -161,6 +164,22 @@ Re-running on `synchronize` keeps the same comment (RecordLoop edits in place), 
 | `npm-registry` | _(empty)_ | Optional npm registry URL (e.g. internal Artifactory mirror). Skipped if a `.npmrc` already exists. |
 | `npm-auth-token` | _(empty)_ | Auth token for `npm-registry`. Cleaned up at end of run. |
 | `pip-index-url` | _(empty)_ | Optional pip index URL. Skipped if `PIP_INDEX_URL` or a `pip.conf` is already set. |
+
+### Responsive recordings
+
+The analyzer still generates one focused flow, then the recorder can replay it
+at multiple sizes without extra LLM cost:
+
+```yaml
+- uses: vihaanshahh/recordloop@v1
+  with:
+    openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+    viewports: desktop,mobile,tall
+```
+
+`mobile` uses a touch-enabled mobile browser context at `390x844`. `tall`
+records a `1280x1600` viewport for longer pages. Custom breakpoints use
+`WIDTHxHEIGHT`, for example `414x896`.
 
 ## Provider configuration
 
@@ -324,7 +343,7 @@ logic is wrong for your environment.
 
 The agent sees a token-budgeted overview of every changed file in the PR and uses tools to drill into whichever ones look load-bearing. It generates exactly one short flow (2–5 steps) whose every step targets the changed region — no wandering through unchanged UI.
 
-A Playwright worker on the runner replays the flow, ffmpeg converts the MP4 to a 15 fps palette-optimised GIF, and the action uploads it to a `recordloop-recordings` pre-release in your repo. The GIF renders inline in the PR comment.
+A Playwright worker on the runner replays the flow, ffmpeg converts the MP4 to a 15 fps palette-optimised GIF, and the action uploads it to a `recordloop-recordings` pre-release in your repo. The GIF renders inline in the PR comment for each selected viewport.
 
 ## What the agent guarantees
 

@@ -24,6 +24,9 @@ Env vars consumed:
     PR_NUMBER             — integer
     PREVIEW_URL           — optional; empty = skip Playwright recording
     BASE_URL              — optional; base branch URL for before/after comparison
+    RECORDLOOP_VIEWPORTS  — comma-separated recording profiles, e.g. desktop,mobile
+    RECORDLOOP_WAIT_UNTIL — networkidle (default), load, or domcontentloaded
+    RECORDLOOP_SETTLE_MS  — extra wait after load before actions begin
     PROVIDER              — "openai" (default), "azure", or "anthropic"
     MODEL                 — optional; defaults to gpt-5.4 / claude-opus-4-7
     GITHUB_OUTPUT         — auto-set by GitHub Actions (output sink path)
@@ -39,6 +42,16 @@ import traceback
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default) or default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 def _emit_output(key: str, value: str) -> None:
@@ -99,6 +112,88 @@ def _format_cost_footer(cost) -> str:
     )
 
 
+def _recording_viewport_label(rec: dict) -> str:
+    label = rec.get("viewport_label") or rec.get("viewport") or "Recording"
+    width = rec.get("viewport_width")
+    height = rec.get("viewport_height")
+    if width and height:
+        return f"{label} ({width}x{height})"
+    return str(label)
+
+
+def _aggregate_recording_status(recordings: list[dict]) -> str:
+    statuses = [r.get("status") or "" for r in recordings]
+    if not statuses:
+        return ""
+    if "failed" in statuses:
+        return "failed"
+    if all(s == "passed" for s in statuses):
+        return "passed"
+    if "demo" in statuses:
+        return "demo"
+    return statuses[0]
+
+
+def _append_recording_block(lines: list[str], flow, rec: dict, include_viewport_heading: bool) -> bool:
+    """Append one recording block. Returns True if media exists only locally."""
+    if include_viewport_heading:
+        status_label = _STATUS_LABELS.get(rec.get("status") or "", "")
+        suffix = f" · {status_label}" if status_label else ""
+        lines.append(f"#### {_recording_viewport_label(rec)}{suffix}")
+        lines.append("")
+
+    # Inline rendering: GitHub strips <video> tags from arbitrary CDNs
+    # but renders animated GIFs via <img>. The slideshow GIF gives the
+    # reviewer pixels-in-comment; the .webm link below is for reviewers
+    # who want smooth motion.
+    gif_url = rec.get("gif_url")
+    video_url = rec.get("video_url")
+    if gif_url:
+        alt = f"{_flow_title(flow.name)} - {_recording_viewport_label(rec)}"
+        lines.append(f"![{alt}]({gif_url})")
+    if video_url:
+        lines.append(f"[▶ Watch full recording]({video_url})")
+    has_video_without_url = not gif_url and not video_url and bool(rec.get("gif") or rec.get("video"))
+
+    lines.append("")
+
+    for af in rec.get("assertion_failures") or []:
+        lines.append(
+            f"> ❌ assertion failed — `{af['selector']}` "
+            f"{('(' + af['value'] + ')') if af.get('value') else ''} — {af['reason']}"
+        )
+    if rec.get("assertion_failures"):
+        lines.append("")
+
+    status = rec.get("status") or ""
+    if status in ("passed", "failed", "demo"):
+        asserts_passed = rec.get("assertions_passed", 0)
+        asserts_total = rec.get("assertions_total", 0)
+        assertion_summary = (
+            f"{asserts_passed}/{asserts_total} assertions"
+            if asserts_total
+            else "no assertions"
+        )
+        trace_prefix = (
+            f"{_recording_viewport_label(rec)} · "
+            if include_viewport_heading
+            else ""
+        )
+        lines.append(
+            f"<details><summary>{trace_prefix}Flow trace · "
+            f"{len(flow.steps)} steps · {assertion_summary}</summary>"
+        )
+        lines.append("")
+        for s in flow.steps:
+            extra = f" — `{s.value}`" if s.value else ""
+            marker = "🔍" if s.is_assertion else "•"
+            lines.append(f"- {marker} **{s.action}** `{s.selector}`{extra}")
+        lines.append("")
+        lines.append("</details>")
+
+    return has_video_without_url
+
+
 def _render_comment(flows, preview_url: str, recordings: list | None, cost=None) -> str:
     if not flows:
         body = (
@@ -110,12 +205,14 @@ def _render_comment(flows, preview_url: str, recordings: list | None, cost=None)
 
     lines = ["## RecordLoop", ""]
 
-    rec_by_name = {r.get("name"): r for r in (recordings or [])}
+    recs_by_name: dict[str, list[dict]] = {}
+    for r in recordings or []:
+        recs_by_name.setdefault(r.get("name"), []).append(r)
     has_video_without_url = False
 
     for f in flows:
-        rec = rec_by_name.get(f.name) or {}
-        status = rec.get("status") or ""
+        recs = recs_by_name.get(f.name, [])
+        status = _aggregate_recording_status(recs)
         status_label = _STATUS_LABELS.get(status, "")
 
         # Heading: status badge + human title + source file
@@ -128,51 +225,17 @@ def _render_comment(flows, preview_url: str, recordings: list | None, cost=None)
             lines.append(f.change_context)
         lines.append("")
 
-        # Inline rendering: GitHub strips <video> tags from arbitrary CDNs
-        # but renders animated GIFs via <img>. The slideshow GIF gives the
-        # reviewer pixels-in-comment; the .webm link below is for reviewers
-        # who want smooth motion.
-        gif_url = rec.get("gif_url")
-        video_url = rec.get("video_url")
-        if gif_url:
-            lines.append(f"![{_flow_title(f.name)}]({gif_url})")
-        if video_url:
-            lines.append(f"[▶ Watch full recording]({video_url})")
-        if not gif_url and not video_url and (rec.get("gif") or rec.get("video")):
-            has_video_without_url = True
-
-        lines.append("")
-
-        # Failure breakdown comes BEFORE the collapsed details so reviewers
-        # see what broke without expanding anything.
-        for af in rec.get("assertion_failures") or []:
-            lines.append(
-                f"> ❌ assertion failed — `{af['selector']}` "
-                f"{('(' + af['value'] + ')') if af.get('value') else ''} — {af['reason']}"
-            )
-        if rec.get("assertion_failures"):
-            lines.append("")
-
-        if not rec and not preview_url and not _env("RECORDLOOP_DETECTED_URL"):
+        if not recs and not preview_url and not _env("RECORDLOOP_DETECTED_URL"):
             lines.append("_📋 planned (no preview URL configured)_")
-        elif status in ("passed", "failed", "demo"):
-            asserts_passed = rec.get("assertions_passed", 0)
-            asserts_total = rec.get("assertions_total", 0)
-            assertion_summary = (
-                f"{asserts_passed}/{asserts_total} assertions"
-                if asserts_total
-                else "no assertions"
-            )
-            lines.append(
-                f"<details><summary>Flow trace · {len(f.steps)} steps · {assertion_summary}</summary>"
-            )
-            lines.append("")
-            for s in f.steps:
-                extra = f" — `{s.value}`" if s.value else ""
-                marker = "🔍" if s.is_assertion else "•"
-                lines.append(f"- {marker} **{s.action}** `{s.selector}`{extra}")
-            lines.append("")
-            lines.append("</details>")
+        else:
+            include_viewport_heading = len(recs) > 1
+            for rec in recs:
+                has_video_without_url = (
+                    _append_recording_block(lines, f, rec, include_viewport_heading)
+                    or has_video_without_url
+                )
+                if include_viewport_heading:
+                    lines.append("")
 
         lines.append("")
 
@@ -205,6 +268,9 @@ async def main() -> int:
     base_url = _env("BASE_URL") or _env("RECORDLOOP_BASE_URL")
     provider = _env("PROVIDER", "openai").lower()
     model = _env("MODEL") or None
+    recording_viewports = _env("RECORDLOOP_VIEWPORTS", "desktop")
+    recording_wait_until = _env("RECORDLOOP_WAIT_UNTIL", "networkidle")
+    recording_settle_ms = _env_int("RECORDLOOP_SETTLE_MS", 300)
 
     if not repo or not pr_number_str or not github_token:
         print("RecordLoop: missing required env (REPO, PR_NUMBER, GITHUB_TOKEN)", file=sys.stderr)
@@ -218,7 +284,8 @@ async def main() -> int:
 
     print(
         f"RecordLoop → {repo}#{pr_number}  provider={provider}  "
-        f"preview={preview_url or '(none)'}  base={base_url or '(none)'}"
+        f"preview={preview_url or '(none)'}  base={base_url or '(none)'}  "
+        f"viewports={recording_viewports}"
     )
 
     # Lazy imports keep cold-start fast and prove the lazy chain still works.
@@ -316,7 +383,13 @@ async def main() -> int:
         try:
             from api.cloud_recorder import record_flows  # lazy: pulls in playwright
             recordings = await asyncio.to_thread(
-                record_flows, flows, preview_url, storage_state=storage_state,
+                record_flows,
+                flows,
+                preview_url,
+                storage_state=storage_state,
+                viewports=recording_viewports,
+                wait_until=recording_wait_until,
+                settle_ms=recording_settle_ms,
             )
             passed = sum(1 for r in recordings if r.get("status") == "passed")
             failed = sum(1 for r in recordings if r.get("status") == "failed")
